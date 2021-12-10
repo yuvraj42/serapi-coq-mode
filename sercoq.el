@@ -4,7 +4,7 @@
 
 ;;; Code:
 
-(defun sercoq-buffers ()
+(defun sercoq--buffers ()
   "Return an alist containing buffer objects for buffers goal and response like proof-general has."
   `((goals . ,(get-buffer-create "*sercoq-goals*"))
     (response . ,(get-buffer-create "*sercoq-response*"))))
@@ -19,7 +19,7 @@ the goal and response windows.
 If ALTERNATE is non-nil, all windows are split horizontally"
   (interactive "S")
   
-  (let-alist (sercoq-buffers)
+  (let-alist (sercoq--buffers)
     (delete-other-windows)
     (with-selected-window (if alternate
 			      (split-window)
@@ -44,7 +44,7 @@ Fields in the alist:
 beginning and end positions of the corresponding coq sentence in the document
 - `accumulator': list of strings output by the process that have not been interpreted as sexps yet.
 - `inprocess-region': a cons cell (beginning . end) denoting position of the string in the buffer that has been sent for parsing but hasn't been fully parsed yet
-- `current-query-type': a symbol representing what kind of query was sent.  currently only goals queries are supported so it will be set to 'Goals when a goals query is made..
+- `last-query-type': a symbol representing what kind of query was sent last.  currently only goals queries are supported so it will be set to 'Goals when a goals query is made..
 - `checkpoint': the position upto which the buffer has been executed and is therefore locked"
   `((process . ,process)
     (parsing-status . ,(intern "complete"))
@@ -53,7 +53,7 @@ beginning and end positions of the corresponding coq sentence in the document
     (sids . ,(list))
     (sentences . ,(make-hash-table :test 'eq))
     (accumulator . ,(list))
-    (current-query-type . ,(list))
+    (last-query-type . ,(list))
     (inprocess-region . ,(list))
     (checkpoint . 1)))
 
@@ -69,8 +69,8 @@ beginning and end positions of the corresponding coq sentence in the document
   (let* ((buf (process-buffer proc))
 	 (state (buffer-local-value 'sercoq--state buf)))
     (when (and buf state)
-      (with-current-buffer (get-buffer-create "sercoq-sertop-output")
-	(insert str))
+      ;; (with-current-buffer (get-buffer-create "sercoq-sertop-output")
+      ;; 	(insert str))
       (let-alist state
 	(let ((parts (split-string str "\n" nil))
 	      (full-responses nil))
@@ -110,14 +110,23 @@ beginning and end positions of the corresponding coq sentence in the document
        (route ,_) (contents ,contents))
 
      (let-alist sercoq--state
-       (let ((sen (gethash sid .sentences)))
-	 (when sen
+       (let ((sen (gethash sid .sentences))
+	     (oldmessage ""))
+	 (and sen
 	   (pcase contents
-	     ( `(Message ,_ ,_ ,_ (str ,message))
-	       (put-text-property (car sen) (cdr sen) 'help-echo message)
+	     ( `(Message ,_ ,_ ,_ (str ,newmessage))
+	       ;; get any previous uncleared message that may be present
+	       (setq oldmessage (get-text-property (car sen) 'help-echo))
+	       ;; if there is existing message, concatenate newmessage to it
+	       (when oldmessage
+		 (setq newmessage (concat oldmessage "\n" newmessage)))
+	       (let ((inhibit-read-only t))
+		 (with-silent-modifications
+		   (put-text-property (car sen) (cdr sen) 'help-echo newmessage)))
 	       ;; put the received coq output in response buffer
-	       (with-current-buffer (alist-get 'response (sercoq-buffers))
-		 (insert message))))))))))
+	       (with-current-buffer (alist-get 'response (sercoq--buffers))
+		 (erase-buffer)
+		 (insert newmessage))))))))))
 
 
 (defun sercoq--get-loc-bounds (loc)
@@ -183,8 +192,10 @@ beginning and end positions of the corresponding coq sentence in the document
 
 (defun sercoq--reset-added-text-properties (begin end)
   "Remove all properties sercoq-added to the text between BEGIN and END."
-  ;; remove echo message
-  (remove-text-properties begin end '(help-echo nil)))
+  (let ((inhibit-read-only t))
+    (with-silent-modifications
+    ;; remove echo message
+      (remove-text-properties begin end '(help-echo nil)))))
 
 
 (defun sercoq--remove-sid (sid)
@@ -200,25 +211,29 @@ beginning and end positions of the corresponding coq sentence in the document
 (defun sercoq--handle-cancel (canceled)
   "Update buffer-local state when sertop cancels the sids in CANCELED."
   (mapc #'sercoq--remove-sid canceled)
-  ;; in responses buffer, display the result of the sid that is at the top in sids
-  (let* ((recent-sid (car (sercoq--get-state-variable 'sids)))
-	 (pos (gethash recent-sid (sercoq--get-state-variable 'sentences)))
-	 (new-response (get-text-property (car pos) 'help-echo)))
-    (with-current-buffer (alist-get 'response (sercoq-buffers))
-      (erase-buffer)
-      (insert new-response))))
+  ;; in responses buffer, display the result of the sid that is now the last exec'd sid
+  (if (sercoq--get-state-variable 'sids)
+    (let* ((recent-sid (car (sercoq--get-state-variable 'sids)))
+	   (pos (gethash recent-sid (sercoq--get-state-variable 'sentences)))
+	   (new-response (get-text-property (car pos) 'help-echo)))
+      (with-current-buffer (alist-get 'response (sercoq--buffers))
+	(erase-buffer)
+	(when new-response
+	  (insert new-response))))
+    ;; else just erase responses buffer if no valid sentences remain
+      (with-current-buffer (alist-get 'response (sercoq--buffers))
+	(erase-buffer))))
 
 
-(defun sercoq--handle-objlist (objlist)
-  "Handle OBJLIST answers, which are results of queries."
-  (pcase objlist
+(defun sercoq--handle-obj (obj)
+  "Handle obj type answer with coq object OBJ, which is usually a results of some query."
+  (pcase obj
     (`(CoqString ,str)
-     (pcase (cdr (assq 'current-query-type sercoq--state))
+     (pcase (sercoq--get-state-variable 'last-query-type)
        ('Goals
 	;; insert str into goals buffer
-	(let-alist (sercoq-buffers)
-	  (with-current-buffer .goals
-	    (insert str))))))))
+	  (with-current-buffer (alist-get 'goals (sercoq--buffers))
+	    (insert str)))))))
 
 
 (defun sercoq--handle-answer (answer)
@@ -230,7 +245,8 @@ beginning and end positions of the corresponding coq sentence in the document
      (setcdr (assq 'inprocess-region sercoq--state) nil))
     (`(Added ,sid ,loc ,_) (sercoq--handle-add sid loc))
     (`(Canceled ,canceled-sids) (sercoq--handle-cancel canceled-sids))
-    (`(ObjList ,objlist) (sercoq--handle-objlist objlist))
+    (`(ObjList ,objlist) (dolist (obj objlist)
+			   (sercoq--handle-obj obj)))
     (`(CoqExn ,exninfo) (message (sercoq--exninfo-string exninfo)))))
 
 
@@ -251,7 +267,16 @@ beginning and end positions of the corresponding coq sentence in the document
 	       (accept-process-output)
 	       (setq sercoq--state nil)
 	       (message "Sercoq process stopped"))
-      (message "No running instance of sertop"))))
+      (message "No running instance of sertop")))
+  (setq sercoq--state nil)
+  (let-alist (sercoq--buffers)
+    (kill-buffer .goals)
+    (kill-buffer .response))
+  (delete-other-windows)
+  (sercoq--make-readonly-region-writable (point-min) (point-max))
+  (sercoq--reset-added-text-properties (point-min) (point-max))
+  ;; switch to fundamental mode
+  (fundamental-mode))
 
 
 (defun sercoq--ensure-sertop ()
@@ -317,7 +342,7 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
   ;; remember to reverse the unexec'd sids list
   (dolist (sid (nreverse (sercoq--get-state-variable 'unexecd-sids)))
     ;; clear the response buffer whenever a new sid is exec'd
-    (with-current-buffer (alist-get 'response (sercoq-buffers))
+    (with-current-buffer (alist-get 'response (sercoq--buffers))
       (erase-buffer))
     (sercoq--send-to-sertop (sercoq--construct-exec-cmd sid))
     ;; empty the unexecd-sids list
@@ -328,9 +353,9 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
   "Send a goals query to sertop and update goals buffer."
   (interactive)
   ;; indicate in state that current query type is goals
-  (setcdr (assq 'current-query-type sercoq--state) 'Goals)
+  (setcdr (assq 'last-query-type sercoq--state) 'Goals)
   ;; clear the goals buffer)
-  (with-current-buffer (alist-get 'goals (sercoq-buffers))
+  (with-current-buffer (alist-get 'goals (sercoq--buffers))
     (erase-buffer))
   ;; send a goals query
   (sercoq--send-to-sertop (sercoq--construct-goals-query)))
@@ -339,7 +364,7 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
 (defun sercoq-exec-region (beg end)
   "Parse and execute the text in the region marked by BEG and END."
   (interactive "r")
-  ;; remove already executed part
+  ;; update region boundaries to exclude text that overlaps with already executed text
   (unless (> beg (sercoq--get-state-variable 'checkpoint))
       (setq beg (sercoq--get-state-variable 'checkpoint)))
 
@@ -363,12 +388,14 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
 	(sids-to-cancel (list)))
 
     ;; find which sids-to-cancel
-    (while (< pt (cdr (gethash (car sids) sentences)))
+    (while (and sids (< pt (cdr (gethash (car sids) sentences))))
       (push (car sids) sids-to-cancel)
       (setq sids (cdr sids)))
 
     ;; cancel the sid (and hence all depending on it will be cancelled automatically by sertop)
-    (sercoq--send-to-sertop (sercoq--construct-cancel-cmd sids-to-cancel))))
+    (sercoq--send-to-sertop (sercoq--construct-cancel-cmd sids-to-cancel))
+    ;; update goals
+    (sercoq--update-goals)))
 
 
 (defun sercoq-exec-next-sentence ()
@@ -377,15 +404,17 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
   (let ((beg (sercoq--get-state-variable 'checkpoint)))
     (goto-char beg)
     (forward-sentence)
-    (sercoq-exec-region beg (point))))
+    (sercoq-exec-region beg (point))
+    (forward-char)))
 
 
 (defun sercoq-undo-previous-sentence ()
   "Undo the last executed sentence."
   (interactive)
-  (let ((end (sercoq--get-state-variable 'checkpoint)))
-    (goto-char end)
-    (backward-sentence)
+  ;; move point to beginning of the last executed sentence and execute 'sercoq-cancel-statements-upto-point
+  (let* ((sid (car (sercoq--get-state-variable 'sids)))
+	 (pos (gethash sid (sercoq--get-state-variable 'sentences))))
+    (goto-char (car pos))
     (sercoq-cancel-statements-upto-point (point))))
 
 
@@ -403,6 +432,7 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
 
 (defun sercoq-goto-end-of-locked ()
   "Go to the end of executed region."
+  (interactive)
   (goto-char (sercoq--get-state-variable 'checkpoint)))
 
 ;; define the major mode function deriving from the basic mode `prog-mode'
