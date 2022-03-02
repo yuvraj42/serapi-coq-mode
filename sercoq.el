@@ -265,7 +265,6 @@ beginning and end positions of the corresponding coq sentence in the document
 	(progn (set-process-filter .process #'ignore)
 	       (delete-process .process)
 	       (accept-process-output)
-	       (setq sercoq--state nil)
 	       (message "Sercoq process stopped"))
       (message "No running instance of sertop")))
   (setq sercoq--state nil)
