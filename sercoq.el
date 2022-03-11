@@ -4,6 +4,8 @@
 
 ;;; Code:
 
+(require 'sercoq-queue)
+
 (defun sercoq--buffers ()
   "Return an alist containing buffer objects for buffers goal and response like proof-general has."
   `((goals . ,(get-buffer-create "*sercoq-goals*"))
@@ -37,7 +39,7 @@ If ALTERNATE is non-nil, all windows are split horizontally"
   "Initialize the state as an alist.
 Fields in the alist:
 - `process': the process object, set as PROCESS
-- `parsing-status': whether the parsing process (Add command) is `complete' or `busy' (i.e, whether the (Answer tag Complete) has been received or not
+- `sertop-queue': Queue of operations queued in sertop currently.  The items currently are  `parse', `exec',`goals', and `cancel'.
 - `unexecd-sids': sentence ids that haven't been exec'd yet, ordered as most recent at the head of the list
 - `sids' : a list (treated as a stack) containing all sentence ids returned by sertop, ordered as most recent at the head of the list
 - `sentences': a hash map from sentence id to cons cells containing
@@ -47,7 +49,7 @@ beginning and end positions of the corresponding coq sentence in the document
 - `last-query-type': a symbol representing what kind of query was sent last.  currently only goals queries are supported so it will be set to 'Goals when a goals query is made..
 - `checkpoint': the position upto which the buffer has been executed and is therefore locked"
   `((process . ,process)
-    (parsing-status . ,(intern "complete"))
+    (sertop-queue . ,(sercoq-queue-create))
     (unexecd-sids . ,(list))
     ;; using (list) instead of nil because we need to modify this returned alist and constants shouldn't be modified destructively
     (sids . ,(list))
@@ -114,7 +116,7 @@ beginning and end positions of the corresponding coq sentence in the document
 	     (oldmessage ""))
 	 (and sen
 	   (pcase contents
-	     ( `(Message ,_ ,_ ,_ (str ,newmessage))
+	     ( `(Message (level Notice) ,_ ,_ (str ,newmessage))
 	       ;; get any previous uncleared message that may be present
 	       (setq oldmessage (get-text-property (car sen) 'help-echo))
 	       ;; if there is existing message, concatenate newmessage to it
@@ -149,14 +151,11 @@ beginning and end positions of the corresponding coq sentence in the document
     ;; push to unexecd-sids list
     (push sid (cdr (assq 'unexecd-sids sercoq--state)))
     ;; find out region's bounds and add to hash map
-    ;; also update checkpoint
     (let* ((offset (sercoq--get-state-variable 'inprocess-region))
 	   (chkpt (sercoq--get-state-variable 'checkpoint))
 	   (beg (+ (car offset) (car pos)))
 	   (end (+ (car offset) (cdr pos))))
-      (puthash sid `(,beg . ,end) (cdr (assq 'sentences sercoq--state)))
-      (unless (> chkpt end)
-	(sercoq--update-checkpoint end)))))
+      (puthash sid `(,beg . ,end) (cdr (assq 'sentences sercoq--state))))))
 
 
 (defun sercoq--make-region-readonly (begin end)
@@ -241,13 +240,61 @@ beginning and end positions of the corresponding coq sentence in the document
   (pcase answer
     ('Ack ())
     ('Completed
-     (setcdr (assq 'parsing-status sercoq--state) 'complete)
-     (setcdr (assq 'inprocess-region sercoq--state) nil))
+     ;; dequeue sertop queue and make other changes appropriate to the dequeued element
+     (pcase (sercoq--dequeue)
+       ('parse (setcdr (assq 'inprocess-region sercoq--state) nil))
+       ;; update checkpoint on successful execution
+       ('exec (let* ((region (gethash (car (sercoq--get-state-variable 'sids))
+					 (sercoq--get-state-variable 'sentences)))
+			(end (cdr region))
+			(checkpoint (sercoq--get-state-variable 'checkpoint)))
+		   (unless (> checkpoint end)
+		     (sercoq--update-checkpoint end))))
+       ('cancel ())
+       ('goals ())
+       (_ (error "Received completion message from sertop for unknown command"))))
+    
     (`(Added ,sid ,loc ,_) (sercoq--handle-add sid loc))
     (`(Canceled ,canceled-sids) (sercoq--handle-cancel canceled-sids))
     (`(ObjList ,objlist) (dolist (obj objlist)
 			   (sercoq--handle-obj obj)))
-    (`(CoqExn ,exninfo) (message (sercoq--exninfo-string exninfo)))))
+    (`(CoqExn ,exninfo)
+     (let ((queue (sercoq--get-state-variable 'sertop-queue))
+	   (errormsg (sercoq--exninfo-string exninfo)))
+     (pcase (sercoq-queue-front queue)
+       ('parse (sercoq--handle-parse-error errormsg))
+       ('exec (sercoq--handle-exec-error errormsg))
+       (_ (message errormsg)))))))
+
+
+(defun sercoq--handle-parse-error (&optional errormsg)
+  "Display parsing error message ERRORMSG to user and update state accordingly."
+  ;; set inprocess region as nil
+  (let* ((region (sercoq--get-state-variable 'inprocess-region))
+	 (beg (number-to-string (car region)))
+	 (end (number-to-string (cdr region))))
+    (setcdr (assq 'inprocess-region sercoq--state) (list))
+    ;; display error message
+    (message (concat "Parse error: " beg "-" end " :" errormsg))))
+
+
+(defun sercoq--handle-exec-error (&optional errormsg)
+  "Display semantic error message ERRORMSG to user and update state accordingly."
+  (let* ((sids (sercoq--get-state-variable 'unexecd-sids))
+	 (errorsid (car sids)) ;; the topmost sid in sids caused the error
+	 (region (gethash errorsid (sercoq--get-state-variable 'sentences)))
+	 (beg (number-to-string (car region)))
+	 (end (number-to-string (cdr region))))
+    ;; cancel statements with unexecd sids
+    (sercoq--cancel-sids sids)
+    ;; remove the sids from state variable `sids' as well
+    (dolist (sid sids)
+      (setcdr (assq 'sids sercoq--state)
+	      (delete sid (sercoq--get-state-variable 'sids))))
+    ;; set unexecd sids as nil
+    (setcdr (assq 'unexecd-sids sercoq--state) (list))
+    ;; display error message
+    (message (concat "Semantic error: " beg "-" end " :" errormsg))))
 
 
 (defun sercoq--start-sertop ()
@@ -285,6 +332,19 @@ beginning and end positions of the corresponding coq sentence in the document
     (sercoq--start-sertop)))
 
 
+(defun sercoq--dequeue ()
+  "Dequeue sertop queue and return the dequeued element."
+  (let ((retval (sercoq-queue-dequeue (sercoq--get-state-variable 'sertop-queue))))
+    (setcdr (assq 'sertop-queue sercoq--state) (car retval))
+    (cdr retval)))
+
+
+(defun sercoq--enqueue (operation)
+  "Enqueue OPERATION to `sertop-queue'."
+    (setcdr (assq 'sertop-queue sercoq--state)
+	    (sercoq-queue-enqueue operation (sercoq--get-state-variable 'sertop-queue))))
+
+
 (defun sercoq--pp-to-string (val)
   "Convert VAL to a printed sexp representation.
 Difference from `pp-to-string' is that it renders nil as (), not nil."
@@ -320,32 +380,46 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
     (process-send-string proc (sercoq--pp-to-string sexp))
     (process-send-string proc "\n")))
 
+(defun sercoq--cancel-sids (sids)
+  "Cancels sentences with sids in the list SIDS."
+  ;; cancel the sid (and hence all depending on it will be cancelled automatically by sertop)
+  (sercoq--enqueue 'cancel)
+  (sercoq--send-to-sertop (sercoq--construct-cancel-cmd sids)))
+
 
 (defun sercoq--add-string (str)
   "Send an Add command to sertop with the given string STR."
   (let ((cmd (sercoq--construct-add-cmd str)))
-    ;; set parsing status as busy
-    (setcdr (assq 'parsing-status sercoq--state) 'busy)
+    ;; enqueue `parse' to sertop queue
+    (sercoq--enqueue 'parse)
     (sercoq--send-to-sertop cmd)))
 
 
-(defun sercoq--wait-until-parsing-complete ()
-  "Keep accepting process output until `parsing-status' is 'complete."
-  (while (eq (sercoq--get-state-variable 'parsing-status)
-	     'busy)
+(defun sercoq--wait-until-sertop-idle ()
+  "Keep accepting process output until `sertop-queue' is empty."
+  (while (not (sercoq-queue-emptyp (sercoq--get-state-variable 'sertop-queue)))
     (accept-process-output (sercoq--get-state-variable 'process))))
 
 
 (defun sercoq--exec-unexecd-sids ()
   "Send exec command to sertop for all newly added i.e. unexec'd sids."
   ;; remember to reverse the unexec'd sids list
-  (dolist (sid (nreverse (sercoq--get-state-variable 'unexecd-sids)))
+  (setcdr (assq 'unexecd-sids sercoq--state) (nreverse (sercoq--get-state-variable 'unexecd-sids)))
+  ;; pop sids one by one and exec them
+  (let (sid)
+  (while (setq sid (car (sercoq--get-state-variable 'unexecd-sids)))
     ;; clear the response buffer whenever a new sid is exec'd
     (with-current-buffer (alist-get 'response (sercoq--buffers))
       (erase-buffer))
+    ;; enqueue `exec' to sertop queue
+    (sercoq--enqueue 'exec)
+    ;; send exec command to sertop
     (sercoq--send-to-sertop (sercoq--construct-exec-cmd sid))
-    ;; empty the unexecd-sids list
-    (setcdr (assq 'unexecd-sids sercoq--state) nil)))
+    ;; wait until execution is completed
+    (sercoq--wait-until-sertop-idle)
+    ;; pop the top sid
+    (pop (sercoq--get-state-variable 'unexecd-sids)))))
+
 
 
 (defun sercoq--update-goals ()
@@ -357,6 +431,7 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
   (with-current-buffer (alist-get 'goals (sercoq--buffers))
     (erase-buffer))
   ;; send a goals query
+  (sercoq--enqueue 'goals)
   (sercoq--send-to-sertop (sercoq--construct-goals-query)))
 
 
@@ -371,7 +446,7 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
     ;; set inprocess-region in state
     (setcdr (assq 'inprocess-region sercoq--state) `(,beg . ,end))
     (sercoq--add-string (buffer-substring-no-properties beg end))
-    (sercoq--wait-until-parsing-complete)
+    (sercoq--wait-until-sertop-idle)
     ;; now exec the newly added sids
     (sercoq--exec-unexecd-sids)
     ;; update goals
@@ -392,7 +467,7 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
       (setq sids (cdr sids)))
 
     ;; cancel the sid (and hence all depending on it will be cancelled automatically by sertop)
-    (sercoq--send-to-sertop (sercoq--construct-cancel-cmd sids-to-cancel))
+    (sercoq--cancel-sids sids-to-cancel)
     ;; update goals
     (sercoq--update-goals)))
 
@@ -452,9 +527,13 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
   (define-key sercoq-mode-map (kbd "C-c C-b") #'sercoq-exec-buffer)
   (define-key sercoq-mode-map (kbd "C-c C-r") #'sercoq-retract-buffer)
   (define-key sercoq-mode-map (kbd "C-c C-.") #'sercoq-goto-end-of-locked)
+  (define-key sercoq-mode-map (kbd "C-c C-c") #'sercoq-stop-sertop)
   
   ;; start sertop if not already started
   (sercoq--ensure-sertop))
+
+;; TODO
+;; New error buffer?
 
 
 (provide 'sercoq)
