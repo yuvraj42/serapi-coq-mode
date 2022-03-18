@@ -9,7 +9,8 @@
 (defun sercoq--buffers ()
   "Return an alist containing buffer objects for buffers goal and response like proof-general has."
   `((goals . ,(get-buffer-create "*sercoq-goals*"))
-    (response . ,(get-buffer-create "*sercoq-response*"))))
+    (response . ,(get-buffer-create "*sercoq-response*"))
+    (errors . ,(get-buffer-create "*sercoq-errors*"))))
 
 
 (defun sercoq-show-buffers (&optional alternate)
@@ -22,13 +23,33 @@ If ALTERNATE is non-nil, all windows are split horizontally"
   (interactive "S")
   
   (let-alist (sercoq--buffers)
-    (delete-other-windows)
+    (let ((goals-window (get-buffer-window .goals))
+	  (response-window (get-buffer-window .response)))
+      (when goals-window (delete-window goals-window))
+      (when response-window (delete-window response-window)))
     (with-selected-window (if alternate
 			      (split-window)
 			    (split-window-horizontally))
       (switch-to-buffer .goals)
       (with-selected-window (split-window)
 	(switch-to-buffer .response)))))
+
+
+(defun sercoq--show-error-buffer ()
+  "Show the error buffer."
+  (let-alist (sercoq--buffers)
+  (let ((errors-window (get-buffer-window .errors)))
+    (when errors-window (delete-window errors-window)))
+  (with-selected-window (split-window)
+    (switch-to-buffer .errors))))
+
+
+(defun sercoq--show-error (errmsg)
+  "Show error message ERRMSG in the error buffer."
+  (with-current-buffer (alist-get 'errors (sercoq--buffers))
+    (erase-buffer)
+    (insert errmsg))
+  (sercoq--show-error-buffer))
 
 
 (defvar-local sercoq--state nil
@@ -57,7 +78,7 @@ beginning and end positions of the corresponding coq sentence in the document
     (accumulator . ,(list))
     (last-query-type . ,(list))
     (inprocess-region . ,(list))
-    (checkpoint . 1)))
+    (checkpoint . ,1)))
 
 
 (defmacro sercoq--get-state-variable (name)
@@ -264,7 +285,7 @@ beginning and end positions of the corresponding coq sentence in the document
      (pcase (sercoq-queue-front queue)
        ('parse (sercoq--handle-parse-error errormsg))
        ('exec (sercoq--handle-exec-error errormsg))
-       (_ (message errormsg)))))))
+       (_ (sercoq--show-error errormsg)))))))
 
 
 (defun sercoq--handle-parse-error (&optional errormsg)
@@ -275,7 +296,7 @@ beginning and end positions of the corresponding coq sentence in the document
 	 (end (number-to-string (cdr region))))
     (setcdr (assq 'inprocess-region sercoq--state) (list))
     ;; display error message
-    (message (concat "Parse error: " beg "-" end " :" errormsg))))
+    (sercoq--show-error (concat "Parse error: " beg "-" end " :" errormsg))))
 
 
 (defun sercoq--handle-exec-error (&optional errormsg)
@@ -294,7 +315,7 @@ beginning and end positions of the corresponding coq sentence in the document
     ;; set unexecd sids as nil
     (setcdr (assq 'unexecd-sids sercoq--state) (list))
     ;; display error message
-    (message (concat "Semantic error: " beg "-" end " :" errormsg))))
+    (sercoq--show-error (concat "Semantic error: " beg "-" end " :" errormsg))))
 
 
 (defun sercoq--start-sertop ()
@@ -317,7 +338,8 @@ beginning and end positions of the corresponding coq sentence in the document
   (setq sercoq--state nil)
   (let-alist (sercoq--buffers)
     (kill-buffer .goals)
-    (kill-buffer .response))
+    (kill-buffer .response)
+    (kill-buffer .errors))
   (delete-other-windows)
   (sercoq--make-readonly-region-writable (point-min) (point-max))
   (sercoq--reset-added-text-properties (point-min) (point-max))
@@ -380,6 +402,29 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
     (process-send-string proc (sercoq--pp-to-string sexp))
     (process-send-string proc "\n")))
 
+
+(defun sercoq--balanced-comments-p (beg end)
+  "Predicate to check if the string between BEG and END has balanced coq comments."
+  (let* ((str (buffer-substring-no-properties beg end))
+	 (unclosed 0) ;; number of unclosed comments
+	 (index 0)
+	 (len (length str)))
+    
+    (while (< index (1- len))
+      (let ((c1 (aref str index))
+	    (c2 (aref str (1+ index))))
+	(if (char-equal c1 ?\()
+	    (if (char-equal c2 ?*)
+		(setq unclosed (1+ unclosed)))
+	  
+	  (if (char-equal c1 ?*)
+	      (if (char-equal c2 ?\))
+		  (setq unclosed (1- unclosed))))))
+      (setq index (1+ index)))
+
+    (equal unclosed 0))) ;; returns t if no unclosed comments in the string
+
+
 (defun sercoq--cancel-sids (sids)
   "Cancels sentences with sids in the list SIDS."
   ;; cancel the sid (and hence all depending on it will be cancelled automatically by sertop)
@@ -435,6 +480,22 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
   (sercoq--send-to-sertop (sercoq--construct-goals-query)))
 
 
+(defun sercoq-forward-sentence ()
+  "Move point to the end of the next coq sentence, skipping comments."
+  (interactive)
+  (let ((beg (point))
+	(loop-condition t)
+	(sentence-end-regex "\\.\\($\\|  \\| \\)[
+]*"))
+    ;; a make-shift exit control loop
+    (while loop-condition
+      (re-search-forward sentence-end-regex nil t) ;; the additional two arguments are to tell elisp to not raise error if no match is found
+      (skip-chars-backward " \t\n")
+      
+      (when (sercoq--balanced-comments-p beg (point)) ;; when the comments are balanced, set loop-condition to exit loop
+	(setq loop-condition nil)))))
+
+
 (defun sercoq-exec-region (beg end)
   "Parse and execute the text in the region marked by BEG and END."
   (interactive "r")
@@ -477,7 +538,7 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
   (interactive)
   (let ((beg (sercoq--get-state-variable 'checkpoint)))
     (goto-char beg)
-    (forward-sentence)
+    (sercoq-forward-sentence)
     (sercoq-exec-region beg (point))
     (forward-char)))
 
@@ -509,19 +570,14 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
   (interactive)
   (goto-char (sercoq--get-state-variable 'checkpoint)))
 
-;; define the major mode function deriving from the basic mode `prog-mode'
 
+;; define the major mode function deriving from the basic mode `prog-mode'
 (define-derived-mode sercoq-mode
   prog-mode "Sercoq"
   "Major mode for interacting with Coq."
-  
-  ;; In coq, sentences end with a period followed by whitespaces.
-  ;; So make emacs' defintion of end of a sentence match that idea to be able
-  ;; to use `forward-sentence' and similar functions with coq sentences
-  (make-local-variable 'sentence-end-double-space)
-  (setq sentence-end-double-space nil)
 
   ;; add some keyboard shortcuts to the keymap
+  (define-key sercoq-mode-map (kbd "M-e") #'sercoq-forward-sentence)
   (define-key sercoq-mode-map (kbd "C-c C-n") #'sercoq-exec-next-sentence)
   (define-key sercoq-mode-map (kbd "C-c C-u") #'sercoq-undo-previous-sentence)
   (define-key sercoq-mode-map (kbd "C-c C-b") #'sercoq-exec-buffer)
