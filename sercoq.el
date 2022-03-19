@@ -52,6 +52,15 @@ If ALTERNATE is non-nil, all windows are split horizontally"
   (sercoq--show-error-buffer))
 
 
+(defun sercoq--kill-word-at-point ()
+  "Kills word at point."
+  (interactive)
+  (let ((bounds (bounds-of-thing-at-point 'word)))
+    (if bounds
+        (kill-region (car bounds) (cdr bounds))
+      (message "No word at point"))))
+
+
 (defvar-local sercoq--state nil
   "Buffer-local object storing state of the ide")
 
@@ -60,14 +69,14 @@ If ALTERNATE is non-nil, all windows are split horizontally"
   "Initialize the state as an alist.
 Fields in the alist:
 - `process': the process object, set as PROCESS
-- `sertop-queue': Queue of operations queued in sertop currently.  The items currently are  `parse', `exec',`goals', and `cancel'.
+- `sertop-queue': Queue of operations queued in sertop currently.  The items currently are  `parse', `exec',`query', and `cancel'.
 - `unexecd-sids': sentence ids that haven't been exec'd yet, ordered as most recent at the head of the list
 - `sids' : a list (treated as a stack) containing all sentence ids returned by sertop, ordered as most recent at the head of the list
 - `sentences': a hash map from sentence id to cons cells containing
 beginning and end positions of the corresponding coq sentence in the document
 - `accumulator': list of strings output by the process that have not been interpreted as sexps yet.
 - `inprocess-region': a cons cell (beginning . end) denoting position of the string in the buffer that has been sent for parsing but hasn't been fully parsed yet
-- `last-query-type': a symbol representing what kind of query was sent last.  currently only goals queries are supported so it will be set to 'Goals when a goals query is made..
+- `last-query-type': a symbol representing what kind of query was sent last.
 - `checkpoint': the position upto which the buffer has been executed and is therefore locked"
   `((process . ,process)
     (sertop-queue . ,(sercoq-queue-create))
@@ -245,15 +254,36 @@ beginning and end positions of the corresponding coq sentence in the document
 	(erase-buffer))))
 
 
-(defun sercoq--handle-obj (obj)
-  "Handle obj type answer with coq object OBJ, which is usually a results of some query."
-  (pcase obj
-    (`(CoqString ,str)
-     (pcase (sercoq--get-state-variable 'last-query-type)
-       ('Goals
-	;; insert str into goals buffer
-	  (with-current-buffer (alist-get 'goals (sercoq--buffers))
-	    (insert str)))))))
+(defun sercoq--handle-objlist (objs)
+  "Handle obj type answer with coq object list OBJS, which is usually a result of some query."
+  (let ((CoqStrings (list)))
+
+    (dolist (obj objs)
+      (pcase obj
+	(`(CoqString ,str)
+	 (when (and (not (stringp str)) ;; sertop CoqStrings are sometimes strings, sometimes not
+		    (symbolp str))
+	   (setq str (symbol-name str))) ;; ensure str is a string if sertop returns it as a symbol
+	 (push str CoqStrings))))
+
+    (setq CoqStrings (nreverse CoqStrings)) ;; pushing each element reversed the order, so reverse it back
+    
+    (pcase (sercoq--get-state-variable 'last-query-type)
+      ('Goals
+       ;; concatenate strings and insert into goals buffer
+       (with-current-buffer (alist-get 'goals (sercoq--buffers))
+	 (insert (apply #'concat CoqStrings))))
+
+      ('Autocomplete
+       (cond ((> (length CoqStrings) 1)
+	      (sercoq--kill-word-at-point)
+	      (insert (nth (dropdown-list CoqStrings) CoqStrings)))
+
+	     ((= (length CoqStrings) 1)
+	      (sercoq--kill-word-at-point)
+	      (insert (car CoqStrings)))
+
+	     ((= (length CoqStrings) 0) (message "No autocompletions found")))))))
 
 
 (defun sercoq--handle-answer (answer)
@@ -272,13 +302,12 @@ beginning and end positions of the corresponding coq sentence in the document
 		   (unless (> checkpoint end)
 		     (sercoq--update-checkpoint end))))
        ('cancel ())
-       ('goals ())
+       ('query ())
        (_ (error "Received completion message from sertop for unknown command"))))
     
     (`(Added ,sid ,loc ,_) (sercoq--handle-add sid loc))
     (`(Canceled ,canceled-sids) (sercoq--handle-cancel canceled-sids))
-    (`(ObjList ,objlist) (dolist (obj objlist)
-			   (sercoq--handle-obj obj)))
+    (`(ObjList ,objlist) (sercoq--handle-objlist objlist))
     (`(CoqExn ,exninfo)
      (let ((queue (sercoq--get-state-variable 'sertop-queue))
 	   (errormsg (sercoq--exninfo-string exninfo)))
@@ -395,6 +424,11 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
   `(Query ((pp ((pp_format PpStr)))) Goals))
 
 
+(defun sercoq--construct-autocomplete-query (str)
+  "Construct an autocomplete query for string STR to be sent to sertop."
+  `(Query ((pp ((pp_format PpStr)))) (Complete ,str)))
+
+
 (defun sercoq--send-to-sertop (sexp)
   "Send printed representation of SEXP to the running sertop process."
   ;; dont forget to send a newline at the end
@@ -475,16 +509,16 @@ If ALTERNATE is non-nil, check if the string between BEG and END has no unopened
 
 
 
-(defun sercoq--update-goals ()
+(defun sercoq-update-goals ()
   "Send a goals query to sertop and update goals buffer."
   (interactive)
   ;; indicate in state that current query type is goals
   (setcdr (assq 'last-query-type sercoq--state) 'Goals)
-  ;; clear the goals buffer)
+  ;; clear the goals buffer
   (with-current-buffer (alist-get 'goals (sercoq--buffers))
     (erase-buffer))
   ;; send a goals query
-  (sercoq--enqueue 'goals)
+  (sercoq--enqueue 'query)
   (sercoq--send-to-sertop (sercoq--construct-goals-query)))
 
 
@@ -553,7 +587,7 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
     ;; now exec the newly added sids
     (sercoq--exec-unexecd-sids)
     ;; update goals
-    (sercoq--update-goals)
+    (sercoq-update-goals)
     (sercoq-show-buffers)))
 
 
@@ -572,7 +606,7 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
     ;; cancel the sid (and hence all depending on it will be cancelled automatically by sertop)
     (sercoq--cancel-sids sids-to-cancel)
     ;; update goals
-    (sercoq--update-goals)))
+    (sercoq-update-goals)))
 
 
 (defun sercoq-exec-next-sentence ()
@@ -607,6 +641,18 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
   (sercoq-cancel-statements-upto-point (point-min)))
 
 
+(defun sercoq-autocomplete-current-word ()
+  "Provides autocompletion for current word using the package `dropdown-list'."
+  (interactive)
+  (require 'dropdown-list)
+  (let ((str (thing-at-point 'word t))) ;; get word at point
+    ;; indicate in state that current query type is autocomplete
+    (setcdr (assq 'last-query-type sercoq--state) 'Autocomplete)
+    ;; send an autocomplete query
+    (sercoq--enqueue 'query)
+    (sercoq--send-to-sertop (sercoq--construct-autocomplete-query str))))
+
+
 (defun sercoq-goto-end-of-locked ()
   "Go to the end of executed region."
   (interactive)
@@ -625,6 +671,7 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
   ;; add some keyboard shortcuts to the keymap
   (define-key sercoq-mode-map (kbd "M-e") #'sercoq-forward-sentence)
   (define-key sercoq-mode-map (kbd "M-a") #'sercoq-backward-sentence)
+  (define-key sercoq-mode-map (kbd "<C-tab>") #'sercoq-autocomplete-current-word)
   (define-key sercoq-mode-map (kbd "C-c C-n") #'sercoq-exec-next-sentence)
   (define-key sercoq-mode-map (kbd "C-c C-u") #'sercoq-undo-previous-sentence)
   (define-key sercoq-mode-map (kbd "C-c C-b") #'sercoq-exec-buffer)
