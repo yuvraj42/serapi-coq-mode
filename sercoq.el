@@ -403,8 +403,9 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
     (process-send-string proc "\n")))
 
 
-(defun sercoq--balanced-comments-p (beg end)
-  "Predicate to check if the string between BEG and END has balanced coq comments."
+(defun sercoq--no-unclosed-comments-p (beg end &optional alternate)
+  "Predicate to check if the string between BEG and END has no unclosed coq comments.
+If ALTERNATE is non-nil, check if the string between BEG and END has no unopened coq comments."
   (let* ((str (buffer-substring-no-properties beg end))
 	 (unclosed 0) ;; number of unclosed comments
 	 (index 0)
@@ -422,7 +423,14 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
 		  (setq unclosed (1- unclosed))))))
       (setq index (1+ index)))
 
-    (equal unclosed 0))) ;; returns t if no unclosed comments in the string
+    (if alternate
+	(>= unclosed 0)
+      (<= unclosed 0))))
+
+
+(defun sercoq--no-unopened-comments-p (beg end)
+  "Wrapper for sercoq--no-unopened-comments-p to check if the string between BEG and END has no unopened coq comments."
+  (sercoq--no-unclosed-comments-p beg end t))
 
 
 (defun sercoq--cancel-sids (sids)
@@ -480,20 +488,54 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
   (sercoq--send-to-sertop (sercoq--construct-goals-query)))
 
 
-(defun sercoq-forward-sentence ()
-  "Move point to the end of the next coq sentence, skipping comments."
+(defun sercoq--sentence-end ()
+  "Returns the regex for the matching the end of a coq sentence."
+  "\\.\\($\\|  \\| \\)*[
+]*")
+
+    
+(defun sercoq-forward-sentence (&optional arg)
+  "Move point to the end of the next coq sentence, skipping comments.
+The action is performed ARG times (defaults to 1).
+If ARG is negative, perform ARG times the operation of moving point to the end of the previous sentence."
+  (interactive "p")
+  (or arg (setq arg 1))
+  
+  (while (> arg 0)
+    (let ((beg (point))
+	  (loop-condition t))
+      ;; a make-shift exit control loop
+      (while loop-condition
+	(re-search-forward (sercoq--sentence-end) nil t) ;; the additional two arguments are to tell elisp to not raise error if no match is found
+	(skip-chars-backward " \t\n")
+	
+	(when (sercoq--no-unclosed-comments-p beg (point)) ;; when no unclosed comments remain, set loop-condition to exit loop
+	  (setq loop-condition nil))))
+    (setq arg (1- arg)))
+
+  ;; for negative, the idea is to search backward for the regex
+  ;; the search needs to be done once or twice depending on whether point
+  ;; is in the middle of a sentence or at the end, which is found using
+  ;; `looking-back'
+  (while (< arg 0)
+    (let ((beg (point))
+	  (loop-condition t))
+      (while loop-condition
+	(when (looking-back (sercoq--sentence-end) nil)
+	  ;; when already at the end of a sentence,
+	  ;; move the point to before the end so we can search backward for the regex to go to the end of previous sentence
+	  (re-search-backward (sercoq--sentence-end) nil t))
+	(re-search-backward (sercoq--sentence-end) nil t)
+	(re-search-forward "\\." nil t) ;; move point to end of previous sentence
+	(when (sercoq--no-unopened-comments-p beg (point)) ;; when no unopened comments remain, set loop-condition to exit loop
+	  (setq loop-condition nil))))
+    (setq arg (1+ arg))))
+
+
+(defun sercoq-backward-sentence ()
+  "Move point to the end of the previous sentence."
   (interactive)
-  (let ((beg (point))
-	(loop-condition t)
-	(sentence-end-regex "\\.\\($\\|  \\| \\)[
-]*"))
-    ;; a make-shift exit control loop
-    (while loop-condition
-      (re-search-forward sentence-end-regex nil t) ;; the additional two arguments are to tell elisp to not raise error if no match is found
-      (skip-chars-backward " \t\n")
-      
-      (when (sercoq--balanced-comments-p beg (point)) ;; when the comments are balanced, set loop-condition to exit loop
-	(setq loop-condition nil)))))
+  (sercoq-forward-sentence -1))
 
 
 (defun sercoq-exec-region (beg end)
@@ -576,8 +618,13 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
   prog-mode "Sercoq"
   "Major mode for interacting with Coq."
 
+  ;; set comment-start and comment-end for prog mode
+  (set (make-local-variable 'comment-start) "(*")
+  (set (make-local-variable 'comment-end) "*)")
+  
   ;; add some keyboard shortcuts to the keymap
   (define-key sercoq-mode-map (kbd "M-e") #'sercoq-forward-sentence)
+  (define-key sercoq-mode-map (kbd "M-a") #'sercoq-backward-sentence)
   (define-key sercoq-mode-map (kbd "C-c C-n") #'sercoq-exec-next-sentence)
   (define-key sercoq-mode-map (kbd "C-c C-u") #'sercoq-undo-previous-sentence)
   (define-key sercoq-mode-map (kbd "C-c C-b") #'sercoq-exec-buffer)
@@ -587,9 +634,6 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
   
   ;; start sertop if not already started
   (sercoq--ensure-sertop))
-
-;; TODO
-;; New error buffer?
 
 
 (provide 'sercoq)
