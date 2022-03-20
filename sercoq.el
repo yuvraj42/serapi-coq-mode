@@ -524,7 +524,7 @@ If ALTERNATE is non-nil, check if the string between BEG and END has no unopened
 
 (defun sercoq--sentence-end ()
   "Returns the regex for the matching the end of a coq sentence."
-  "\\.\\($\\|  \\| \\)*[
+  "\\.\\($\\|  \\| \\)+[
 ]*")
 
     
