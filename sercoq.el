@@ -2,6 +2,10 @@
 
 ;;; Commentary:
 
+;; TODO:
+;; make sercoq--send-to-sertop accept a 2nd argument which should be the symbol to queue in to `sertop-queue'
+;; make sercoq--sentence-end a constant instead of a function
+
 ;;; Code:
 
 (require 'sercoq-queue)
@@ -63,6 +67,31 @@ If ALTERNATE is non-nil, all windows are split horizontally"
 
 (defvar-local sercoq--state nil
   "Buffer-local object storing state of the ide")
+
+
+(defconst sercoq--query-cmds
+  `((option . (quote Option))
+    (search . (quote Search))
+    (goals . (quote Goals))
+    (egoals . (quote EGoals))
+    (ast . (quote Ast))
+    (typeof . (list 'TypeOf (read-string "TypeOf of : ")))
+    (names .  (list 'Names (read-string "Names argument : ")))
+    (tactics . (list 'Tactics (read-string "Tactics argument : ")))
+    (locate . (list 'Locate (read-string "Locate argument : ")))
+    (implicits . (list 'Implicits (read-string "Implicits argument : ")))
+    (unparsing . (list 'Unparsing (read-string "Unparsing of : ")))
+    (definition . (list 'Definition (read-string "Definition of : ")))
+    (logical-path . (list 'LogicalPath (read-string "Logical Path for : ")))
+    (pnotations . (quote PNotations))
+    (profile-data . (quote ProfileData))
+    (proof . (quote Proof))
+    (vernac . (list 'Vernac (read-string "Vernac of : ")))
+    (env . (quote Env))
+    (assumptions .(list 'Assumptions (read-string "Assumptions of : ")))
+    (completion . (list 'Complete (read-string "Completions of : ")))
+    (comments . (quote Comments)))
+  "An alist of query keywords mapped to their corresponding query commands.")
 
 
 (defun sercoq--get-fresh-state (process)
@@ -508,6 +537,79 @@ If ALTERNATE is non-nil, check if the string between BEG and END has no unopened
     (pop (sercoq--get-state-variable 'unexecd-sids)))))
 
 
+(defun sercoq--get-sid-at (arg)
+  "Get sid of sentence at position ARG."
+  (sercoq--get-sid-at-helper arg (sercoq--get-state-variable 'sids)))
+
+
+(defun sercoq--get-sid-at-helper (arg sids)
+  "Get sid of sentence at position ARG checking in the list SIDS."
+  (if (null sids)
+      nil ;; base case
+    
+    (let* ((sid (car sids))
+	   (region (gethash sid (sercoq--get-state-variable 'sentences)))
+	   (beg (car region))
+	   (end (cdr region)))
+      (if (and (>= arg beg) (<= arg end))
+	  sid
+	(sercoq--get-sid-at-helper arg (cdr sids))))))
+;; sadly elisp doesnt have tail-call recursion optimization or the above would have been faster
+;; the alternative is to use an ugly while loop, but the performance difference shouldn't matter all that much
+
+
+(defun sercoq--read-query-preds ()
+  "Read query predicates from user."
+  (remove-if (lambda (x) (null (nth 1 x))) ;; remove options that are nil
+	     `((Prefix ,(read-string "Query predicate - Prefix: " nil nil '(nil))))))
+
+
+(defun sercoq--read-non-neg-number (prompt)
+  "Read number from user, displaying PROMPT.
+In case of negative number or no number, return nil."
+  (let ((num (read-number prompt -1)))
+    (if (>= num 0)
+	num
+      nil)))
+
+
+(defun sercoq--read-sid (prompt)
+  "Read number from user displaying PROMPT.
+Return the number if it is a valid sid."
+  (let ((num (read-number prompt -1)))
+    (if (and (>= num 0)
+	     (gethash num (sercoq--get-state-variable 'sentences)))
+	num
+      nil)))
+
+
+(defun sercoq--read-format-opts ()
+  "Read format options from user."
+  (remove-if (lambda (x) (null (nth 1 x))) ;; remove options that are nil
+	     `((pp_format ,(completing-read "Pp format: " '(PpSer PpStr PpTex PpCoq) nil t nil nil '(nil)))
+	       (pp_depth ,(sercoq--read-non-neg-number "Pp depth (leave default for sertop default): "))
+	       (pp_elide ,(read-string "Pp Elipsis: " nil nil '(nil)))
+	       (pp_margin ,(sercoq--read-non-neg-number "Pp Margin (leave default for sertop default): ")))))
+
+
+(defun sercoq--read-query-opts ()
+  "Read query options from user."
+  (remove-if (lambda (x) (null (nth 1 x))) ;; remove options that are nil
+	     `((preds ,(sercoq--read-query-preds)) ;; predicates
+	       (limit ,(sercoq--read-non-neg-number "Limit on number of results (leave default for no limit): "))
+	       (sid ,(sercoq--read-sid "Sentence id (leave default for no specific sid): "))
+	       (pp ,(sercoq--read-format-opts)))))
+
+
+(defun sercoq--default-query-opts ()
+  "Default query opts for sercoq-mode."
+  `((pp ((pp_format PpStr)))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;; Interactive functions  ;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 
 (defun sercoq-update-goals ()
   "Send a goals query to sertop and update goals buffer."
@@ -522,8 +624,17 @@ If ALTERNATE is non-nil, check if the string between BEG and END has no unopened
   (sercoq--send-to-sertop (sercoq--construct-goals-query)))
 
 
+(defun sercoq-sentence-id-at-point ()
+  "Get sentence id of the sentence at point."
+  (interactive)
+  (let ((sid (sercoq--get-sid-at (point))))
+    (message (if sid
+		 (number-to-string sid)
+	       "no sentence exists at current point"))))
+
+
 (defun sercoq--sentence-end ()
-  "Returns the regex for the matching the end of a coq sentence."
+  "Return the regex for the matching the end of a coq sentence."
   "\\.\\($\\|  \\| \\)+[
 ]*")
 
@@ -641,6 +752,12 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
   (sercoq-cancel-statements-upto-point (point-min)))
 
 
+(defun sercoq-goto-end-of-locked ()
+  "Go to the end of executed region."
+  (interactive)
+  (goto-char (sercoq--get-state-variable 'checkpoint)))
+
+
 (defun sercoq-autocomplete-current-word ()
   "Provides autocompletion for current word using the package `dropdown-list'."
   (interactive)
@@ -653,10 +770,22 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
     (sercoq--send-to-sertop (sercoq--construct-autocomplete-query str))))
 
 
-(defun sercoq-goto-end-of-locked ()
-  "Go to the end of executed region."
+(defun sercoq-make-query ()
+  "Make a query of ARG type to sertop."
   (interactive)
-  (goto-char (sercoq--get-state-variable 'checkpoint)))
+  (let* ((argstr (completing-read "Query type: " (mapcar #'car sercoq--query-functions) nil t))
+	 (arg (read argstr))
+	 (query-cmd (eval (alist-get arg sercoq--query-cmds)))
+	 (query (when query-cmd `(Query
+				  ,(if (y-or-n-p "Do you want to specify query options? ")
+				       (sercoq--read-query-opts)
+				     nil)
+				  ,query-cmd))))
+  ;; indicate in state the current query type
+  (setcdr (assq 'last-query-type sercoq--state) arg)
+  ;; send the query to sertop
+  (sercoq--enqueue 'query)
+  (sercoq--send-to-sertop query)))
 
 
 ;; define the major mode function deriving from the basic mode `prog-mode'
