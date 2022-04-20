@@ -7,37 +7,6 @@
 (require 'sercoq-queue)
 
 
-(defconst sercoq--query-cmds
-  `((option . (quote Option))
-    (search . (quote Search))
-    (goals . (quote Goals))
-    (egoals . (quote EGoals))
-    (ast . (quote Ast))
-    (typeof . (list 'TypeOf (read-string "TypeOf of : ")))
-    (names .  (list 'Names (read-string "Names argument : ")))
-    (tactics . (list 'Tactics (read-string "Tactics argument : ")))
-    (locate . (list 'Locate (read-string "Locate argument : ")))
-    (implicits . (list 'Implicits (read-string "Implicits argument : ")))
-    (unparsing . (list 'Unparsing (read-string "Unparsing of : ")))
-    (definition . (list 'Definition (read-string "Definition of : ")))
-    (logical-path . (list 'LogicalPath (read-string "Logical Path for : ")))
-    (pnotations . (quote PNotations))
-    (profile-data . (quote ProfileData))
-    (proof . (quote Proof))
-    (vernac . (list 'Vernac (read-string "Vernac of : ")))
-    (env . (quote Env))
-    (assumptions .(list 'Assumptions (read-string "Assumptions of : ")))
-    (completion . (list 'Complete (read-string "Completions of : ")))
-    (comments . (quote Comments)))
-  "An alist of query keywords mapped to their corresponding query commands.")
-
-
-(defconst sercoq--sentence-end
-  "\\.\\($\\|  \\| \\)+[
-]*"
-  "Return the regex for the matching the end of a coq sentence.")
-
-
 (defun sercoq--buffers ()
   "Return an alist containing buffer objects for buffers goal and response like proof-general has."
   `((goals . ,(get-buffer-create "*sercoq-goals*"))
@@ -95,6 +64,37 @@ If ALTERNATE is non-nil, all windows are split horizontally"
 
 (defvar-local sercoq--state nil
   "Buffer-local object storing state of the ide")
+
+
+(defconst sercoq--query-cmds
+  `((option . (quote Option))
+    (search . (quote Search))
+    (goals . (quote Goals))
+    (egoals . (quote EGoals))
+    (ast . (quote Ast))
+    (typeof . (list 'TypeOf (read-string "TypeOf of : ")))
+    (names .  (list 'Names (read-string "Names argument : ")))
+    (tactics . (list 'Tactics (read-string "Tactics argument : ")))
+    (locate . (list 'Locate (read-string "Locate argument : ")))
+    (implicits . (list 'Implicits (read-string "Implicits argument : ")))
+    (unparsing . (list 'Unparsing (read-string "Unparsing of : ")))
+    (definition . (list 'Definition (read-string "Definition of : ")))
+    (logical-path . (list 'LogicalPath (read-string "Logical Path for : ")))
+    (pnotations . (quote PNotations))
+    (profile-data . (quote ProfileData))
+    (proof . (quote Proof))
+    (vernac . (list 'Vernac (read-string "Vernac of : ")))
+    (env . (quote Env))
+    (assumptions .(list 'Assumptions (read-string "Assumptions of : ")))
+    (completion . (list 'Complete (read-string "Completions of : ")))
+    (comments . (quote Comments)))
+  "An alist of query keywords mapped to their corresponding query commands.")
+
+
+(defconst sercoq--sentence-end
+  "\\.\\($\\|  \\| \\)+[
+]*"
+  "Return the regex for the matching the end of a coq sentence.")
 
 
 (defun sercoq--get-fresh-state (process)
@@ -451,16 +451,6 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
   `(Cancel ,sids))
 
 
-(defun sercoq--construct-goals-query ()
-  "Construct a goals query to be sent to sertop."
-  `(Query ((pp ((pp_format PpStr)))) Goals))
-
-
-(defun sercoq--construct-autocomplete-query (str)
-  "Construct an autocomplete query for string STR to be sent to sertop."
-  `(Query ((pp ((pp_format PpStr)))) (Complete ,str)))
-
-
 (defun sercoq--send-to-sertop (sexp &optional enqueue-sym)
   "Send printed representation of SEXP to the running sertop process.
 If ENQUEUE-SYM is non-nil, enqueue it to sertop-queue."
@@ -510,7 +500,6 @@ If ALTERNATE is non-nil, check if the string between BEG and END has no unopened
 (defun sercoq--add-string (str)
   "Send an Add command to sertop with the given string STR."
   (let ((cmd (sercoq--construct-add-cmd str)))
-    ;; enqueue `parse' to sertop queue
     (sercoq--send-to-sertop cmd 'parse)))
 
 
@@ -621,7 +610,7 @@ Return the number if it is a valid sid."
   (with-current-buffer (alist-get 'goals (sercoq--buffers))
     (erase-buffer))
   ;; send a goals query
-  (sercoq--send-to-sertop (sercoq--construct-goals-query) 'query))
+  (sercoq--send-to-sertop `(Query ,(sercoq--default-query-opts) Goals) 'query))
 
 
 (defun sercoq-sentence-id-at-point ()
@@ -760,7 +749,7 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
     ;; indicate in state that current query type is autocomplete
     (setcdr (assq 'last-query-type sercoq--state) 'Autocomplete)
     ;; send an autocomplete query
-    (sercoq--send-to-sertop (sercoq--construct-autocomplete-query str) 'query)))
+    (sercoq--send-to-sertop `(Query ,(sercoq--default-query-opts) (Complete ,str)) 'query)))
 
 
 (defun sercoq-make-query ()
