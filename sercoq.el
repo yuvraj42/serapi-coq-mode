@@ -2,13 +2,41 @@
 
 ;;; Commentary:
 
-;; TODO:
-;; make sercoq--send-to-sertop accept a 2nd argument which should be the symbol to queue in to `sertop-queue'
-;; make sercoq--sentence-end a constant instead of a function
-
 ;;; Code:
 
 (require 'sercoq-queue)
+
+
+(defconst sercoq--query-cmds
+  `((option . (quote Option))
+    (search . (quote Search))
+    (goals . (quote Goals))
+    (egoals . (quote EGoals))
+    (ast . (quote Ast))
+    (typeof . (list 'TypeOf (read-string "TypeOf of : ")))
+    (names .  (list 'Names (read-string "Names argument : ")))
+    (tactics . (list 'Tactics (read-string "Tactics argument : ")))
+    (locate . (list 'Locate (read-string "Locate argument : ")))
+    (implicits . (list 'Implicits (read-string "Implicits argument : ")))
+    (unparsing . (list 'Unparsing (read-string "Unparsing of : ")))
+    (definition . (list 'Definition (read-string "Definition of : ")))
+    (logical-path . (list 'LogicalPath (read-string "Logical Path for : ")))
+    (pnotations . (quote PNotations))
+    (profile-data . (quote ProfileData))
+    (proof . (quote Proof))
+    (vernac . (list 'Vernac (read-string "Vernac of : ")))
+    (env . (quote Env))
+    (assumptions .(list 'Assumptions (read-string "Assumptions of : ")))
+    (completion . (list 'Complete (read-string "Completions of : ")))
+    (comments . (quote Comments)))
+  "An alist of query keywords mapped to their corresponding query commands.")
+
+
+(defconst sercoq--sentence-end
+  "\\.\\($\\|  \\| \\)+[
+]*"
+  "Return the regex for the matching the end of a coq sentence.")
+
 
 (defun sercoq--buffers ()
   "Return an alist containing buffer objects for buffers goal and response like proof-general has."
@@ -67,31 +95,6 @@ If ALTERNATE is non-nil, all windows are split horizontally"
 
 (defvar-local sercoq--state nil
   "Buffer-local object storing state of the ide")
-
-
-(defconst sercoq--query-cmds
-  `((option . (quote Option))
-    (search . (quote Search))
-    (goals . (quote Goals))
-    (egoals . (quote EGoals))
-    (ast . (quote Ast))
-    (typeof . (list 'TypeOf (read-string "TypeOf of : ")))
-    (names .  (list 'Names (read-string "Names argument : ")))
-    (tactics . (list 'Tactics (read-string "Tactics argument : ")))
-    (locate . (list 'Locate (read-string "Locate argument : ")))
-    (implicits . (list 'Implicits (read-string "Implicits argument : ")))
-    (unparsing . (list 'Unparsing (read-string "Unparsing of : ")))
-    (definition . (list 'Definition (read-string "Definition of : ")))
-    (logical-path . (list 'LogicalPath (read-string "Logical Path for : ")))
-    (pnotations . (quote PNotations))
-    (profile-data . (quote ProfileData))
-    (proof . (quote Proof))
-    (vernac . (list 'Vernac (read-string "Vernac of : ")))
-    (env . (quote Env))
-    (assumptions .(list 'Assumptions (read-string "Assumptions of : ")))
-    (completion . (list 'Complete (read-string "Completions of : ")))
-    (comments . (quote Comments)))
-  "An alist of query keywords mapped to their corresponding query commands.")
 
 
 (defun sercoq--get-fresh-state (process)
@@ -629,12 +632,6 @@ Return the number if it is a valid sid."
 		 (number-to-string sid)
 	       "no sentence exists at current point"))))
 
-
-(defun sercoq--sentence-end ()
-  "Return the regex for the matching the end of a coq sentence."
-  "\\.\\($\\|  \\| \\)+[
-]*")
-
     
 (defun sercoq-forward-sentence (&optional arg)
   "Move point to the end of the next coq sentence, skipping comments.
@@ -648,7 +645,7 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
 	  (loop-condition t))
       ;; a make-shift exit control loop
       (while loop-condition
-	(re-search-forward (sercoq--sentence-end) nil t) ;; the additional two arguments are to tell elisp to not raise error if no match is found
+	(re-search-forward sercoq--sentence-end nil t) ;; the additional two arguments are to tell elisp to not raise error if no match is found
 	(skip-chars-backward " \t\n")
 	
 	(when (sercoq--no-unclosed-comments-p beg (point)) ;; when no unclosed comments remain, set loop-condition to exit loop
@@ -663,11 +660,11 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
     (let ((beg (point))
 	  (loop-condition t))
       (while loop-condition
-	(when (looking-back (sercoq--sentence-end) nil)
+	(when (looking-back sercoq--sentence-end nil)
 	  ;; when already at the end of a sentence,
 	  ;; move the point to before the end so we can search backward for the regex to go to the end of previous sentence
-	  (re-search-backward (sercoq--sentence-end) nil t))
-	(re-search-backward (sercoq--sentence-end) nil t)
+	  (re-search-backward sercoq--sentence-end nil t))
+	(re-search-backward sercoq--sentence-end nil t)
 	(re-search-forward "\\." nil t) ;; move point to end of previous sentence
 	(when (sercoq--no-unopened-comments-p beg (point)) ;; when no unopened comments remain, set loop-condition to exit loop
 	  (setq loop-condition nil))))
