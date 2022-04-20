@@ -101,7 +101,7 @@ If ALTERNATE is non-nil, all windows are split horizontally"
   "Initialize the state as an alist.
 Fields in the alist:
 - `process': the process object, set as PROCESS
-- `sertop-queue': Queue of operations queued in sertop currently.  The items currently are  `parse', `exec',`query', and `cancel'.
+- `sertop-queue': Queue of operations queued in sertop currently.  See definition of `sercoq--queue-ops'.
 - `unexecd-sids': sentence ids that haven't been exec'd yet, ordered as most recent at the head of the list
 - `sids' : a list (treated as a stack) containing all sentence ids returned by sertop, ordered as most recent at the head of the list
 - `sentences': a hash map from sentence id to cons cells containing
@@ -120,6 +120,14 @@ beginning and end positions of the corresponding coq sentence in the document
     (last-query-type . ,(list))
     (inprocess-region . ,(list))
     (checkpoint . ,1)))
+
+
+(defconst sercoq--queue-ops
+  '(parse
+    exec
+    cancel
+    query)
+  "List of symbols that should be queued in sertop-queue.")
 
 
 (defmacro sercoq--get-state-variable (name)
@@ -424,8 +432,11 @@ beginning and end positions of the corresponding coq sentence in the document
 
 (defun sercoq--enqueue (operation)
   "Enqueue OPERATION to `sertop-queue'."
-    (setcdr (assq 'sertop-queue sercoq--state)
-	    (sercoq-queue-enqueue operation (sercoq--get-state-variable 'sertop-queue))))
+  ;; ensure `operation' is a valid symbol
+  (if (find operation sercoq--queue-ops)
+      (setcdr (assq 'sertop-queue sercoq--state)
+	      (sercoq-queue-enqueue operation (sercoq--get-state-variable 'sertop-queue)))
+    (error "Attempt to queue invalid operation")))
 
 
 (defun sercoq--pp-to-string (val)
