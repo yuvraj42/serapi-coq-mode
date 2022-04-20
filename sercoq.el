@@ -39,10 +39,10 @@ If ALTERNATE is non-nil, all windows are split horizontally"
 (defun sercoq--show-error-buffer ()
   "Show the error buffer."
   (let-alist (sercoq--buffers)
-  (let ((errors-window (get-buffer-window .errors)))
-    (when errors-window (delete-window errors-window)))
-  (with-selected-window (split-window)
-    (switch-to-buffer .errors))))
+    (let ((errors-window (get-buffer-window .errors)))
+      (when errors-window (delete-window errors-window)))
+    (with-selected-window (split-window)
+      (switch-to-buffer .errors))))
 
 
 (defun sercoq--show-error (errmsg)
@@ -161,7 +161,7 @@ beginning and end positions of the corresponding coq sentence in the document
 	  ;; update the bindings in the alist
 	  (setcdr (assq 'accumulator state) .accumulator)
 	  (with-current-buffer buf
-	  (sercoq--handle-new-responses full-responses)))))))
+	    (sercoq--handle-new-responses full-responses)))))))
 
 
 (defun sercoq--handle-new-responses (responses)
@@ -185,20 +185,20 @@ beginning and end positions of the corresponding coq sentence in the document
        (let ((sen (gethash sid .sentences))
 	     (oldmessage ""))
 	 (and sen
-	   (pcase contents
-	     ( `(Message (level Notice) ,_ ,_ (str ,newmessage))
-	       ;; get any previous uncleared message that may be present
-	       (setq oldmessage (get-text-property (car sen) 'help-echo))
-	       ;; if there is existing message, concatenate newmessage to it
-	       (when oldmessage
-		 (setq newmessage (concat oldmessage "\n" newmessage)))
-	       (let ((inhibit-read-only t))
-		 (with-silent-modifications
-		   (put-text-property (car sen) (cdr sen) 'help-echo newmessage)))
-	       ;; put the received coq output in response buffer
-	       (with-current-buffer (alist-get 'response (sercoq--buffers))
-		 (erase-buffer)
-		 (insert newmessage))))))))))
+	      (pcase contents
+		( `(Message (level Notice) ,_ ,_ (str ,newmessage))
+		  ;; get any previous uncleared message that may be present
+		  (setq oldmessage (get-text-property (car sen) 'help-echo))
+		  ;; if there is existing message, concatenate newmessage to it
+		  (when oldmessage
+		    (setq newmessage (concat oldmessage "\n" newmessage)))
+		  (let ((inhibit-read-only t))
+		    (with-silent-modifications
+		      (put-text-property (car sen) (cdr sen) 'help-echo newmessage)))
+		  ;; put the received coq output in response buffer
+		  (with-current-buffer (alist-get 'response (sercoq--buffers))
+		    (erase-buffer)
+		    (insert newmessage))))))))))
 
 
 (defun sercoq--get-loc-bounds (loc)
@@ -210,7 +210,7 @@ beginning and end positions of the corresponding coq sentence in the document
 (defun sercoq--exninfo-string (exninfo)
   "Return the EXNINFO str component."
   (pcase exninfo
-  (`(,_ ,_ ,_ ,_ ,_ (str ,string)) string)))
+    (`(,_ ,_ ,_ ,_ ,_ (str ,string)) string)))
 
 
 (defun sercoq--handle-add (sid loc)
@@ -263,7 +263,7 @@ beginning and end positions of the corresponding coq sentence in the document
   "Remove all properties sercoq-added to the text between BEGIN and END."
   (let ((inhibit-read-only t))
     (with-silent-modifications
-    ;; remove echo message
+      ;; remove echo message
       (remove-text-properties begin end '(help-echo nil)))))
 
 
@@ -282,16 +282,16 @@ beginning and end positions of the corresponding coq sentence in the document
   (mapc #'sercoq--remove-sid canceled)
   ;; in responses buffer, display the result of the sid that is now the last exec'd sid
   (if (sercoq--get-state-variable 'sids)
-    (let* ((recent-sid (car (sercoq--get-state-variable 'sids)))
-	   (pos (gethash recent-sid (sercoq--get-state-variable 'sentences)))
-	   (new-response (get-text-property (car pos) 'help-echo)))
-      (with-current-buffer (alist-get 'response (sercoq--buffers))
-	(erase-buffer)
-	(when new-response
-	  (insert new-response))))
+      (let* ((recent-sid (car (sercoq--get-state-variable 'sids)))
+	     (pos (gethash recent-sid (sercoq--get-state-variable 'sentences)))
+	     (new-response (get-text-property (car pos) 'help-echo)))
+	(with-current-buffer (alist-get 'response (sercoq--buffers))
+	  (erase-buffer)
+	  (when new-response
+	    (insert new-response))))
     ;; else just erase responses buffer if no valid sentences remain
-      (with-current-buffer (alist-get 'response (sercoq--buffers))
-	(erase-buffer))))
+    (with-current-buffer (alist-get 'response (sercoq--buffers))
+      (erase-buffer))))
 
 
 (defun sercoq--handle-objlist (objs)
@@ -336,11 +336,11 @@ beginning and end positions of the corresponding coq sentence in the document
        ('parse (setcdr (assq 'inprocess-region sercoq--state) nil))
        ;; update checkpoint on successful execution
        ('exec (let* ((region (gethash (car (sercoq--get-state-variable 'sids))
-					 (sercoq--get-state-variable 'sentences)))
-			(end (cdr region))
-			(checkpoint (sercoq--get-state-variable 'checkpoint)))
-		   (unless (> checkpoint end)
-		     (sercoq--update-checkpoint end))))
+				      (sercoq--get-state-variable 'sentences)))
+		     (end (cdr region))
+		     (checkpoint (sercoq--get-state-variable 'checkpoint)))
+		(unless (> checkpoint end)
+		  (sercoq--update-checkpoint end))))
        ('cancel ())
        ('query ())
        (_ (error "Received completion message from sertop for unknown command"))))
@@ -351,10 +351,10 @@ beginning and end positions of the corresponding coq sentence in the document
     (`(CoqExn ,exninfo)
      (let ((queue (sercoq--get-state-variable 'sertop-queue))
 	   (errormsg (sercoq--exninfo-string exninfo)))
-     (pcase (sercoq-queue-front queue)
-       ('parse (sercoq--handle-parse-error errormsg))
-       ('exec (sercoq--handle-exec-error errormsg))
-       (_ (sercoq--show-error errormsg)))))))
+       (pcase (sercoq-queue-front queue)
+	 ('parse (sercoq--handle-parse-error errormsg))
+	 ('exec (sercoq--handle-exec-error errormsg))
+	 (_ (sercoq--show-error errormsg)))))))
 
 
 (defun sercoq--handle-parse-error (&optional errormsg)
@@ -526,16 +526,16 @@ If ALTERNATE is non-nil, check if the string between BEG and END has no unopened
   (setcdr (assq 'unexecd-sids sercoq--state) (nreverse (sercoq--get-state-variable 'unexecd-sids)))
   ;; pop sids one by one and exec them
   (let (sid)
-  (while (setq sid (car (sercoq--get-state-variable 'unexecd-sids)))
-    ;; clear the response buffer whenever a new sid is exec'd
-    (with-current-buffer (alist-get 'response (sercoq--buffers))
-      (erase-buffer))
-    ;; send exec command to sertop
-    (sercoq--send-to-sertop (sercoq--construct-exec-cmd sid) 'exec)
-    ;; wait until execution is completed
-    (sercoq--wait-until-sertop-idle)
-    ;; pop the top sid
-    (pop (sercoq--get-state-variable 'unexecd-sids)))))
+    (while (setq sid (car (sercoq--get-state-variable 'unexecd-sids)))
+      ;; clear the response buffer whenever a new sid is exec'd
+      (with-current-buffer (alist-get 'response (sercoq--buffers))
+	(erase-buffer))
+      ;; send exec command to sertop
+      (sercoq--send-to-sertop (sercoq--construct-exec-cmd sid) 'exec)
+      ;; wait until execution is completed
+      (sercoq--wait-until-sertop-idle)
+      ;; pop the top sid
+      (pop (sercoq--get-state-variable 'unexecd-sids)))))
 
 
 (defun sercoq--get-sid-at (arg)
@@ -632,7 +632,7 @@ Return the number if it is a valid sid."
 		 (number-to-string sid)
 	       "no sentence exists at current point"))))
 
-    
+
 (defun sercoq-forward-sentence (&optional arg)
   "Move point to the end of the next coq sentence, skipping comments.
 The action is performed ARG times (defaults to 1).
@@ -682,7 +682,7 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
   (interactive "r")
   ;; update region boundaries to exclude text that overlaps with already executed text
   (unless (> beg (sercoq--get-state-variable 'checkpoint))
-      (setq beg (sercoq--get-state-variable 'checkpoint)))
+    (setq beg (sercoq--get-state-variable 'checkpoint)))
 
   (unless (> beg end)
     ;; set inprocess-region in state
@@ -774,9 +774,9 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
 				       (sercoq--read-query-opts)
 				     nil)
 				  ,query-cmd))))
-  ;; indicate in state the current query type
-  (setcdr (assq 'last-query-type sercoq--state) arg)
-  (sercoq--send-to-sertop query 'query)))
+    ;; indicate in state the current query type
+    (setcdr (assq 'last-query-type sercoq--state) arg)
+    (sercoq--send-to-sertop query 'query)))
 
 
 ;; define the major mode function deriving from the basic mode `prog-mode'
