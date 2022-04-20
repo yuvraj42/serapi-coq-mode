@@ -458,8 +458,10 @@ Difference from `pp-to-string' is that it renders nil as (), not nil."
   `(Query ((pp ((pp_format PpStr)))) (Complete ,str)))
 
 
-(defun sercoq--send-to-sertop (sexp)
-  "Send printed representation of SEXP to the running sertop process."
+(defun sercoq--send-to-sertop (sexp &optional enqueue-sym)
+  "Send printed representation of SEXP to the running sertop process.
+If ENQUEUE-SYM is non-nil, enqueue it to sertop-queue."
+  (when enqueue-sym (sercoq--enqueue enqueue-sym))
   ;; dont forget to send a newline at the end
   (let ((proc (sercoq--get-state-variable 'process)))
     (process-send-string proc (sercoq--pp-to-string sexp))
@@ -499,16 +501,14 @@ If ALTERNATE is non-nil, check if the string between BEG and END has no unopened
 (defun sercoq--cancel-sids (sids)
   "Cancels sentences with sids in the list SIDS."
   ;; cancel the sid (and hence all depending on it will be cancelled automatically by sertop)
-  (sercoq--enqueue 'cancel)
-  (sercoq--send-to-sertop (sercoq--construct-cancel-cmd sids)))
+  (sercoq--send-to-sertop (sercoq--construct-cancel-cmd sids) 'cancel))
 
 
 (defun sercoq--add-string (str)
   "Send an Add command to sertop with the given string STR."
   (let ((cmd (sercoq--construct-add-cmd str)))
     ;; enqueue `parse' to sertop queue
-    (sercoq--enqueue 'parse)
-    (sercoq--send-to-sertop cmd)))
+    (sercoq--send-to-sertop cmd 'parse)))
 
 
 (defun sercoq--wait-until-sertop-idle ()
@@ -527,10 +527,8 @@ If ALTERNATE is non-nil, check if the string between BEG and END has no unopened
     ;; clear the response buffer whenever a new sid is exec'd
     (with-current-buffer (alist-get 'response (sercoq--buffers))
       (erase-buffer))
-    ;; enqueue `exec' to sertop queue
-    (sercoq--enqueue 'exec)
     ;; send exec command to sertop
-    (sercoq--send-to-sertop (sercoq--construct-exec-cmd sid))
+    (sercoq--send-to-sertop (sercoq--construct-exec-cmd sid) 'exec)
     ;; wait until execution is completed
     (sercoq--wait-until-sertop-idle)
     ;; pop the top sid
@@ -620,8 +618,7 @@ Return the number if it is a valid sid."
   (with-current-buffer (alist-get 'goals (sercoq--buffers))
     (erase-buffer))
   ;; send a goals query
-  (sercoq--enqueue 'query)
-  (sercoq--send-to-sertop (sercoq--construct-goals-query)))
+  (sercoq--send-to-sertop (sercoq--construct-goals-query) 'query))
 
 
 (defun sercoq-sentence-id-at-point ()
@@ -766,8 +763,7 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
     ;; indicate in state that current query type is autocomplete
     (setcdr (assq 'last-query-type sercoq--state) 'Autocomplete)
     ;; send an autocomplete query
-    (sercoq--enqueue 'query)
-    (sercoq--send-to-sertop (sercoq--construct-autocomplete-query str))))
+    (sercoq--send-to-sertop (sercoq--construct-autocomplete-query str) 'query)))
 
 
 (defun sercoq-make-query ()
@@ -783,9 +779,7 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
 				  ,query-cmd))))
   ;; indicate in state the current query type
   (setcdr (assq 'last-query-type sercoq--state) arg)
-  ;; send the query to sertop
-  (sercoq--enqueue 'query)
-  (sercoq--send-to-sertop query)))
+  (sercoq--send-to-sertop query 'query)))
 
 
 ;; define the major mode function deriving from the basic mode `prog-mode'
