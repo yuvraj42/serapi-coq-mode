@@ -50,12 +50,16 @@ If ALTERNATE is non-nil, all windows are split horizontally"
   (sercoq--pop-up-buffer (alist-get 'errors (sercoq--buffers))))
 
 
+(defun sercoq--clear-hide-buffer (buf)
+  "Clear the buffer BUF and hide it."
+  (with-current-buffer buf (erase-buffer))
+  (when (window-live-p (get-buffer-window buf))
+    (delete-window (get-buffer-window buf))))
+
+
 (defun sercoq--clear-error-buffer ()
   "Clear the error buffer and hide it."
-  (let ((error-buffer (alist-get 'errors (sercoq--buffers))))
-    (with-current-buffer error-buffer (erase-buffer))
-    (when (window-live-p (get-buffer-window error-buffer))
-      (delete-window (get-buffer-window error-buffer)))))
+  (sercoq--clear-hide-buffer (alist-get 'errors (sercoq--buffers))))
 
 
 (defun sercoq--show-error (errmsg)
@@ -68,7 +72,12 @@ If ALTERNATE is non-nil, all windows are split horizontally"
 
 (defun sercoq--show-query-results-buffer ()
   "Show the query results buffer."
-  (sercoq--pop-up-buffer (alist-get 'errors (sercoq--buffers))))
+  (sercoq--pop-up-buffer (alist-get 'query-results (sercoq--buffers))))
+
+
+(defun sercoq--clear-query-results-buffer ()
+  "Clear the query results buffer and hide it."
+  (sercoq--clear-hide-buffer (alist-get 'query-results (sercoq--buffers))))
 
 
 (defun sercoq--kill-word-at-point ()
@@ -314,7 +323,8 @@ beginning and end positions of the corresponding coq sentence in the document
 
 (defun sercoq--handle-objlist (objs)
   "Handle obj type answer with coq object list OBJS, which is usually a result of some query."
-  (let ((CoqStrings (list)))
+  (let ((query-type (sercoq--get-state-variable 'last-query-type))
+	(CoqStrings (list)))
 
     (dolist (obj objs)
       (pcase obj
@@ -325,23 +335,30 @@ beginning and end positions of the corresponding coq sentence in the document
 	 (push str CoqStrings))))
 
     (setq CoqStrings (nreverse CoqStrings)) ;; pushing each element reversed the order, so reverse it back
-    
-    (pcase (car (sercoq--get-state-variable 'last-query-type))
-      ('goals
-       ;; concatenate strings and insert into goals buffer
-       (with-current-buffer (alist-get 'goals (sercoq--buffers))
-	 (insert (apply #'concat CoqStrings))))
 
-      ('completion
-       (cond ((> (length CoqStrings) 1)
-	      (sercoq--kill-word-at-point)
-	      (insert (nth (dropdown-list CoqStrings) CoqStrings)))
+    (cond ((eq (cdr query-type) 'auto)
+	   (pcase (car query-type)
+	     ('goals
+	      ;; concatenate strings and insert into goals buffer
+	      (with-current-buffer (alist-get 'goals (sercoq--buffers))
+		(insert (apply #'concat CoqStrings))))
 
-	     ((= (length CoqStrings) 1)
-	      (sercoq--kill-word-at-point)
-	      (insert (car CoqStrings)))
+	     ('completion
+	      (cond ((> (length CoqStrings) 1)
+		     (sercoq--kill-word-at-point)
+		     (insert (nth (dropdown-list CoqStrings) CoqStrings)))
 
-	     ((= (length CoqStrings) 0) (message "No autocompletions found")))))))
+		    ((= (length CoqStrings) 1)
+		     (sercoq--kill-word-at-point)
+		     (insert (car CoqStrings)))
+
+		    ((= (length CoqStrings) 0) (message "No autocompletions found"))))))
+	  
+	  ((eq (cdr query-type) 'user)
+	   ;; for now just insert the output into the query-response buffer
+	   (with-current-buffer (alist-get 'query-results (sercoq--buffers))
+	     (insert (apply #'concat CoqStrings)))
+	   (message "Received query results")))))
 
 
 (defun sercoq--handle-answer (answer)
@@ -423,10 +440,8 @@ beginning and end positions of the corresponding coq sentence in the document
 	       (message "Sercoq process stopped"))
       (message "No running instance of sertop")))
   (setq sercoq--state nil)
-  (let-alist (sercoq--buffers)
-    (kill-buffer .goals)
-    (kill-buffer .response)
-    (kill-buffer .errors))
+  (dolist (buf (sercoq--buffers))
+    (kill-buffer (cdr buf)))
   (delete-other-windows)
   (sercoq--make-readonly-region-writable (point-min) (point-max))
   (sercoq--reset-added-text-properties (point-min) (point-max))
@@ -786,17 +801,20 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
 (defun sercoq-make-query ()
   "Make a query of ARG type to sertop."
   (interactive)
-  (let* ((argstr (completing-read "Query type: " (mapcar #'car sercoq--query-functions) nil t))
+  ;; clear the query results buffer
+  (sercoq--clear-query-results-buffer)
+  (let* ((argstr (completing-read "Query type: " (mapcar #'car sercoq--query-cmds) nil t))
 	 (arg (read argstr))
 	 (query-cmd (eval (alist-get arg sercoq--query-cmds)))
 	 (query (when query-cmd `(Query
 				  ,(if (y-or-n-p "Do you want to specify query options? ")
 				       (sercoq--read-query-opts)
-				     nil)
+				     (sercoq--default-query-opts))
 				  ,query-cmd))))
     ;; indicate in state the current query type and that it's a user sent query
     (setcdr (assq 'last-query-type sercoq--state) `(,arg . user))
-    (sercoq--send-to-sertop query 'query)))
+    (sercoq--send-to-sertop query 'query))
+  (sercoq--show-query-results-buffer))
 
 
 ;; define the major mode function deriving from the basic mode `prog-mode'
