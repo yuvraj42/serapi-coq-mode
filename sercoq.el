@@ -11,7 +11,8 @@
   "Return an alist containing buffer objects for buffers goal and response like proof-general has."
   `((goals . ,(get-buffer-create "*sercoq-goals*"))
     (response . ,(get-buffer-create "*sercoq-response*"))
-    (errors . ,(get-buffer-create "*sercoq-errors*"))))
+    (errors . ,(get-buffer-create "*sercoq-errors*"))
+    (query-results . ,(get-buffer-create "*sercoq-query-results*"))))
 
 
 (defun sercoq-show-buffers (&optional alternate)
@@ -36,13 +37,25 @@ If ALTERNATE is non-nil, all windows are split horizontally"
 	(switch-to-buffer .response)))))
 
 
+(defun sercoq--pop-up-buffer (buffer)
+  "Split window into two and show BUFFER."
+  (let ((window (get-buffer-window buffer)))
+    (when window (delete-window window)))
+  (with-selected-window (split-window)
+    (switch-to-buffer buffer)))
+
+
 (defun sercoq--show-error-buffer ()
   "Show the error buffer."
-  (let-alist (sercoq--buffers)
-    (let ((errors-window (get-buffer-window .errors)))
-      (when errors-window (delete-window errors-window)))
-    (with-selected-window (split-window)
-      (switch-to-buffer .errors))))
+  (sercoq--pop-up-buffer (alist-get 'errors (sercoq--buffers))))
+
+
+(defun sercoq--clear-error-buffer ()
+  "Clear the error buffer and hide it."
+  (let ((error-buffer (alist-get 'errors (sercoq--buffers))))
+    (with-current-buffer error-buffer (erase-buffer))
+    (when (window-live-p (get-buffer-window error-buffer))
+      (delete-window (get-buffer-window error-buffer)))))
 
 
 (defun sercoq--show-error (errmsg)
@@ -51,6 +64,11 @@ If ALTERNATE is non-nil, all windows are split horizontally"
     (erase-buffer)
     (insert errmsg))
   (sercoq--show-error-buffer))
+
+
+(defun sercoq--show-query-results-buffer ()
+  "Show the query results buffer."
+  (sercoq--pop-up-buffer (alist-get 'errors (sercoq--buffers))))
 
 
 (defun sercoq--kill-word-at-point ()
@@ -108,7 +126,7 @@ Fields in the alist:
 beginning and end positions of the corresponding coq sentence in the document
 - `accumulator': list of strings output by the process that have not been interpreted as sexps yet.
 - `inprocess-region': a cons cell (beginning . end) denoting position of the string in the buffer that has been sent for parsing but hasn't been fully parsed yet
-- `last-query-type': a symbol representing what kind of query was sent last.
+- `last-query-type': a cons cell (a . b) where a is a symbol representing the last sent query and b is a symbol representing whether it was sent by the user or automatically.
 - `checkpoint': the position upto which the buffer has been executed and is therefore locked"
   `((process . ,process)
     (sertop-queue . ,(sercoq-queue-create))
@@ -308,13 +326,13 @@ beginning and end positions of the corresponding coq sentence in the document
 
     (setq CoqStrings (nreverse CoqStrings)) ;; pushing each element reversed the order, so reverse it back
     
-    (pcase (sercoq--get-state-variable 'last-query-type)
-      ('Goals
+    (pcase (car (sercoq--get-state-variable 'last-query-type))
+      ('goals
        ;; concatenate strings and insert into goals buffer
        (with-current-buffer (alist-get 'goals (sercoq--buffers))
 	 (insert (apply #'concat CoqStrings))))
 
-      ('Autocomplete
+      ('completion
        (cond ((> (length CoqStrings) 1)
 	      (sercoq--kill-word-at-point)
 	      (insert (nth (dropdown-list CoqStrings) CoqStrings)))
@@ -562,7 +580,7 @@ If ALTERNATE is non-nil, check if the string between BEG and END has no unopened
 (defun sercoq--read-query-preds ()
   "Read query predicates from user."
   (remove-if (lambda (x) (null (nth 1 x))) ;; remove options that are nil
-	     `((Prefix ,(read-string "Query predicate - Prefix: " nil nil '(nil))))))
+	     `((Prefix ,(read-string "Query predicate - Prefix (leave default for sertop default): " nil nil '(nil))))))
 
 
 (defun sercoq--read-non-neg-number (prompt)
@@ -587,9 +605,9 @@ Return the number if it is a valid sid."
 (defun sercoq--read-format-opts ()
   "Read format options from user."
   (remove-if (lambda (x) (null (nth 1 x))) ;; remove options that are nil
-	     `((pp_format ,(completing-read "Pp format: " '(PpSer PpStr PpTex PpCoq) nil t nil nil '(nil)))
+	     `((pp_format ,(completing-read "Pp format (default: PpStr): " '(PpSer PpStr PpTex PpCoq) nil t nil nil '(PpStr)))
 	       (pp_depth ,(sercoq--read-non-neg-number "Pp depth (leave default for sertop default): "))
-	       (pp_elide ,(read-string "Pp Elipsis: " nil nil '(nil)))
+	       (pp_elide ,(read-string "Pp Elipsis (leave default for sertop default): " nil nil '(nil)))
 	       (pp_margin ,(sercoq--read-non-neg-number "Pp Margin (leave default for sertop default): ")))))
 
 
@@ -615,8 +633,8 @@ Return the number if it is a valid sid."
 (defun sercoq-update-goals ()
   "Send a goals query to sertop and update goals buffer."
   (interactive)
-  ;; indicate in state that current query type is goals
-  (setcdr (assq 'last-query-type sercoq--state) 'Goals)
+  ;; indicate in state that current query type is goals and is an 'auto' query, i.e, not sent by the user explicitly
+  (setcdr (assq 'last-query-type sercoq--state) '(goals . auto))
   ;; clear the goals buffer
   (with-current-buffer (alist-get 'goals (sercoq--buffers))
     (erase-buffer))
@@ -685,6 +703,8 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
     (setq beg (sercoq--get-state-variable 'checkpoint)))
 
   (unless (> beg end)
+    ;; clear error buffer
+    (sercoq--clear-error-buffer)
     ;; set inprocess-region in state
     (setcdr (assq 'inprocess-region sercoq--state) `(,beg . ,end))
     (sercoq--add-string (buffer-substring-no-properties beg end))
@@ -757,8 +777,8 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
   (interactive)
   (require 'dropdown-list)
   (let ((str (thing-at-point 'word t))) ;; get word at point
-    ;; indicate in state that current query type is autocomplete
-    (setcdr (assq 'last-query-type sercoq--state) 'Autocomplete)
+    ;; indicate in state that current query type is completion and auto (not sent by user explicitly)
+    (setcdr (assq 'last-query-type sercoq--state) '(completion . auto))
     ;; send an autocomplete query
     (sercoq--send-to-sertop `(Query ,(sercoq--default-query-opts) (Complete ,str)) 'query)))
 
@@ -774,8 +794,8 @@ If ARG is negative, perform ARG times the operation of moving point to the end o
 				       (sercoq--read-query-opts)
 				     nil)
 				  ,query-cmd))))
-    ;; indicate in state the current query type
-    (setcdr (assq 'last-query-type sercoq--state) arg)
+    ;; indicate in state the current query type and that it's a user sent query
+    (setcdr (assq 'last-query-type sercoq--state) `(,arg . user))
     (sercoq--send-to-sertop query 'query)))
 
 
