@@ -81,7 +81,7 @@ If ALTERNATE is non-nil, all windows are split horizontally"
 
 
 (defun sercoq--kill-word-at-point ()
-  "Kills word at point."
+  "Kill word at point."
   (interactive)
   (let ((bounds (bounds-of-thing-at-point 'word)))
     (if bounds
@@ -115,7 +115,7 @@ If ALTERNATE is non-nil, all windows are split horizontally"
     (assumptions .(list 'Assumptions (read-string "Assumptions of : ")))
     (completion . (list 'Complete (read-string "Completions of : ")))
     (comments . (quote Comments)))
-  "An alist of query keywords mapped to their corresponding query commands.")
+  "Alist of query keywords mapped to their corresponding query commands.")
 
 
 (defconst sercoq--sentence-end
@@ -326,17 +326,16 @@ beginning and end positions of the corresponding coq sentence in the document
   (let ((query-type (sercoq--get-state-variable 'last-query-type))
 	(CoqStrings (list)))
 
-    (dolist (obj objs)
-      (pcase obj
-	(`(CoqString ,str)
-	 (when (and (not (stringp str)) ;; sertop CoqStrings are sometimes strings, sometimes not
-		    (symbolp str))
-	   (setq str (symbol-name str))) ;; ensure str is a string if sertop returns it as a symbol
-	 (push str CoqStrings))))
-
-    (setq CoqStrings (nreverse CoqStrings)) ;; pushing each element reversed the order, so reverse it back
-
+    ;; case of auto queries
     (cond ((eq (cdr query-type) 'auto)
+	   
+	   (dolist (obj objs)
+	     (pcase obj
+	       (`(CoqString ,str)
+		(push (sercoq--coqstring-to-string str) CoqStrings))))
+
+	   (setq CoqStrings (nreverse CoqStrings)) ;; pushing each element reversed the order, so reverse it back
+	   
 	   (pcase (car query-type)
 	     ('goals
 	      ;; concatenate strings and insert into goals buffer
@@ -353,291 +352,585 @@ beginning and end positions of the corresponding coq sentence in the document
 		     (insert (car CoqStrings)))
 
 		    ((= (length CoqStrings) 0) (message "No autocompletions found"))))))
+
 	  
+	  ;; case of user-made queries
 	  ((eq (cdr query-type) 'user)
-	   ;; for now just insert the output into the query-response buffer
-	   (with-current-buffer (alist-get 'query-results (sercoq--buffers))
-	     (insert (apply #'concat CoqStrings)))
-	   (message "Received query results")))))
+	   (dolist (obj objs)
+	     (with-current-buffer (alist-get 'query-results (sercoq--buffers))
+	       (insert (concat "-----" (prin1-to-string (car obj)) "-----\n\n"))
+	       (insert (or (sercoq--obj-to-string obj) ""))
+	       (insert "\n\n")))))))
 
 
-(defun sercoq--handle-answer (answer)
-  "Handle ANSWER received from sertop."
-  (pcase answer
-    ('Ack ())
-    ('Completed
-     ;; dequeue sertop queue and make other changes appropriate to the dequeued element
-     (pcase (sercoq--dequeue)
-       ('parse (setcdr (assq 'inprocess-region sercoq--state) nil))
-       ;; update checkpoint on successful execution
-       ('exec (let* ((region (gethash (car (sercoq--get-state-variable 'sids))
-				      (sercoq--get-state-variable 'sentences)))
-		     (end (cdr region))
-		     (checkpoint (sercoq--get-state-variable 'checkpoint)))
-		(unless (> checkpoint end)
-		  (sercoq--update-checkpoint end))))
-       ('cancel ())
-       ('query ())
-       (_ (error "Received completion message from sertop for unknown command"))))
+;; the definitions of all these objects can be found in the OCaml code of Coq
+(defun sercoq--obj-to-string (obj)
+  "Return string representation of serapi coq object OBJ."
+
+  (pcase obj
+    (`(CoqString ,str) (sercoq--coqstring-to-string str))
+
+    (`(CoqSList ,strlist) (mapconcat #'sercoq--coqstring-to-string strlist ", "))
+
+    (`(CoqPp ,pp) (prin1-to-string pp))
+
+    (`(CoqLoc ,loc) (sercoq--coqloc-to-string loc))
+
+    (`(CoqTok ,toklst) (sercoq--coqtok-to-string toklst))
+
+    (`(CoqDP ,logpath) (prin1-to-string logpath))
+
+    (`(CoqAst ,ast) (sercoq--coqast-to-string ast))
+
+    (`(CoqOption ,opt-name ,opt-state) (sercoq--coqopt-to-string opt-name opt-state))
+
+    (`(CoqConstr ,constr) (prin1-to-string constr))
+
+    (`(CoqExpr ,expr) (format "Constr. Expr: %s" (sercoq--c-ast-to-string expr)))
+
+    (`(CoqMInd ,names ,decl) (format "Names: %s\nMutual Inductive Body: %s\n"
+				     (prin1-to-string names) (prin1-to-string decl)))
+
+    (`(CoqEnv ,env) (sercoq--coqenv-to-string env))
+
+    (`(CoqTactic ,names ,tactic) (format "Names: %s\nLtac Entry: %s\n"
+					 (prin1-to-string names) (sercoq--coqtactic-to-string tactic)))
+
+    (`(CoqLtac ,ltac) (format "Generic tactic expression: %s" (sercoq--c-ast-to-string ltac)))
+
+    (`(CoqGenArg ,genarg) (prin1-to-string genarg))
+
+    (`(CoqQualId ,qualid) (format "Qualid: %s" (sercoq--c-ast-to-string qualid)))
+
+    (`(CoqGlobRef ,globref) (mapconcat #'prin1-to-string globref " "))
+
+    (`(CoqGlobRefExt ,extglobref) (sercoq--globrefext-to-string extglobref))
+
+    (`(CoqImplicit ,impstatus) (sercoq--coqimplicit-to-string impstatus))
+
+    (`(CoqProfData ,profdata) (sercoq--coqprofdata-to-string profdata))
+
+    (`(CoqNotation ,notation) (sercoq--coqnotation-to-string notation))
+
+    (`(CoqUnparsing ,nprules ,eurules ,grammar) (format "Notation printing rules: %s\nExtra Unparsing Rules: %s\nNotation Grammar: %s"
+							(prin1-to-string nprules)
+							(prin1-to-string eurules)
+							(prin1-to-string grammar)))
+
+    (`(CoqGoal ,goal) (sercoq--coqgoal-to-string goal))
+
+    (`(CoqExtGoal ,extgoal) (prin1-to-string goal))
+
+    (`(CoqProof ,proof) (prin1-to-string proof)) ;; likely to be deprecated so no need to work on representation of CoqProof
+
+    (`(CoqAssumptions ((predicative ,pred) (type_in_type ,tint) (vars ,vars) (axioms ,axs) (opaque ,opaq) (trans ,trans)))
+     (format "Predicative: %s\nType-in-type: %s\nVars: %s\nAxioms: %s\nOpaque: %s\nTrans: %s\n"
+	     (prin1-to-string pred)
+	     (prin1-to-string tint)
+	     (prin1-to-string vars)
+	     (prin1-to-string axs)
+	     (prin1-to-string opaq)
+	     (prin1-to-string trans)))
+
+    (`(CoqComments ,comms) (sercoq--coqcomments-to-string comms))))
+
+
+(defun sercoq--coqstring-to-string (obj)
+  "Return string representation of CoqString OBJ (which may be a symbol or a string)."
+  (when (and (not (stringp obj)) ;; sertop CoqStrings are sometimes strings, sometimes not
+	     (symbolp obj))
+    (setq obj (symbol-name obj))) ;; ensure str is a string if sertop returns it as a symbol
+  obj)
+
+
+(defun sercoq--coqloc-to-string (loc)
+  "Retun string representation of Coq Location object LOC."
+
+  (pcase loc
+    (`((fname ,fname) (line_nb ,lnb) (bol_pos ,bpos) (line_nb_last ,lnl) (bol_pos_last ,bpl) (bp ,bp) (ep ,ep))
+     (format "Fname: %s; line_nb: %d; bol_pos: %d; line_nb_last: %d; bol_pos_last: %d; bp: %d; ep: %d"
+	     (mapconcat #'prin1-to-string (if (listp fname) fname (list fname)) " ") lnb bpos lnl bpl bp ep))))
+
+
+(defun sercoq--coqtok-to-string (toks)
+  "Return string representation of the list of Coq Tokens TOKS."
+
+  ;; make sure toks is a triple-nested list
+  (unless (listp toks) (setq toks (list toks)))
+  (unless (listp (car toks)) (setq toks (list toks)))
+  (unless (listp (car (car toks))) (setq toks (list toks)))
+  
+  
+  (let (strlist
+	tokstr
+	locstr)
     
-    (`(Added ,sid ,loc ,_) (sercoq--handle-add sid loc))
-    (`(Canceled ,canceled-sids) (sercoq--handle-cancel canceled-sids))
-    (`(ObjList ,objlist) (sercoq--handle-objlist objlist))
-    (`(CoqExn ,exninfo)
-     (let ((queue (sercoq--get-state-variable 'sertop-queue))
-	   (errormsg (sercoq--exninfo-string exninfo)))
-       (pcase (sercoq-queue-front queue)
-	 ('parse (sercoq--handle-parse-error errormsg))
-	 ('exec (sercoq--handle-exec-error errormsg))
-	 (_ (sercoq--show-error errormsg)))))))
+    (dolist (tok toks)
+      (pcase tok
+	(`((v ,token) (loc ,loc))
+	 
+	 (setq locstr (if loc (sercoq--coqloc-to-string loc) ""))
+	 (setq tokstr (mapconcat #'prin1-to-string (if (listp token) token (list token)) " "))
+
+	 (push (format "Token: %s\nLocation: %s" tokstr locstr) strlist))))
+
+    (setq strlist (nreverse strlist))
+    (mapconcat #'identity strlist ",\n" )))
 
 
-(defun sercoq--handle-parse-error (&optional errormsg)
-  "Display parsing error message ERRORMSG to user and update state accordingly."
-  ;; set inprocess region as nil
-  (let* ((region (sercoq--get-state-variable 'inprocess-region))
-	 (beg (number-to-string (car region)))
-	 (end (number-to-string (cdr region))))
-    (setcdr (assq 'inprocess-region sercoq--state) (list))
-    ;; display error message
-    (sercoq--show-error (concat "Parse error: " beg "-" end " :" errormsg))))
+(defun sercoq--coqast-to-string (ast)
+  "Return naive string representation of CoqAst AST."
+
+  (pcase ast
+    (`((v ((control ,control) (attrs ,attrs) (expr ,expr))) (loc ,loc))
+
+     (format "Control: %s\n\nAttrs: %s\n\nExpr: %s\n\nLocation: %s\n"
+	     (mapconcat (lambda (x) (unless (listp x) (setq x (list x))) (mapconcat #'prin1-to-string x " ")) control ", ")
+	     (prin1-to-string attrs)
+	     (mapconcat #'prin1-to-string expr "\n")
+	     (if loc (sercoq--coqloc-to-string loc) "")))))
 
 
-(defun sercoq--handle-exec-error (&optional errormsg)
-  "Display semantic error message ERRORMSG to user and update state accordingly."
-  (let* ((sids (sercoq--get-state-variable 'unexecd-sids))
-	 (errorsid (car sids)) ;; the topmost sid in sids caused the error
-	 (region (gethash errorsid (sercoq--get-state-variable 'sentences)))
-	 (beg (number-to-string (car region)))
-	 (end (number-to-string (cdr region))))
-    ;; cancel statements with unexecd sids
-    (sercoq--cancel-sids sids)
-    ;; remove the sids from state variable `sids' as well
-    (dolist (sid sids)
-      (setcdr (assq 'sids sercoq--state)
-	      (delete sid (sercoq--get-state-variable 'sids))))
-    ;; set unexecd sids as nil
-    (setcdr (assq 'unexecd-sids sercoq--state) (list))
-    ;; display error message
-    (sercoq--show-error (concat "Semantic error: " beg "-" end " :" errormsg))))
+(defun sercoq--coqopt-to-string (opt-name opt-state)
+  "Return string representation of Coq Option with name OPT-NAME and state OPT-STATE."
+  (let* ((opt-name-str (mapconcat #'prin1-to-string opt-name " "))
+	 (opt-depr-str (prin1-to-string (nth 1 (car opt-state))))
+	 (opt-val (nth 1 (nth 1 opt-state)))
+	 (opt-val-str (mapconcat #'prin1-to-string opt-val " ")))
+
+    (format "Option name: %s; Option deprecated: %s; Option value: %s"  opt-name-str opt-depr-str opt-val-str)))
 
 
-(defun sercoq--start-sertop ()
-  "Start a new sertop process asynchronously."
-  (let ((proc (make-process :name "sertop" :command '("sertop") :buffer (current-buffer) :sentinel #'ignore)))
-    (set-process-filter proc #'sercoq--sertop-filter)
-    (setq sercoq--state (sercoq--get-fresh-state proc))))
+(defun sercoq--coqenv-to-string (env)
+  "Return string representation of coq kernel level environment ENV."
+
+  (pcase env
+    (`((env_globals ,globals) (env_named_context ,ncxt) (env_rel_context ,rcxt) (env_nb_rel ,nbrel)
+       (env_stratification ,strat) (env_typing_flags ,tflags) (retroknowledge ,retkng) (indirect_pterms ,indpt))
+
+     (format "Globals: %s\nNamed Context: %s\nRel. Context: %s\nNb_rel: %d\nStratification: %s\nTyping Flags: %s\nRetroknowledge: %s\nIndirect Pterms: %s\n"
+
+	     (prin1-to-string globals)
+	     (prin1-to-string ncxt)
+	     (prin1-to-string rcxt)
+	     nbrel
+	     (prin1-to-string strat)
+	     (prin1-to-string tflags)
+	     (prin1-to-string retkng)
+	     (prin1-to-string indpt)))))
 
 
-(defun sercoq-stop-sertop ()
-  "Kill the running sertop process, if any."
-  (interactive)
-  (let-alist sercoq--state
-    (if (and .process (process-live-p .process))
-	(progn (set-process-filter .process #'ignore)
-	       (delete-process .process)
-	       (accept-process-output)
-	       (message "Sercoq process stopped"))
-      (message "No running instance of sertop")))
-  (setq sercoq--state nil)
-  (dolist (buf (sercoq--buffers))
-    (kill-buffer (cdr buf)))
-  (delete-other-windows)
-  (sercoq--make-readonly-region-writable (point-min) (point-max))
-  (sercoq--reset-added-text-properties (point-min) (point-max))
-  ;; switch to fundamental mode
-  (fundamental-mode))
+(defun sercoq--coqtactic-to-string (tactic)
+  "Return string representation of coq ltac entry TACTIC."
+
+  (pcase tactic
+    (`((tac_for_ml ,for-ml) (tac_body ,body) (tac_redef ,modlist) (tac_deprecation ,deprecation))
+
+     (format "Tactic body: %s\n\nTactic redefining modules: %s\nDefined from ML-side: %s\nDeprecation notice: %s\n"
+	     (prin1-to-string body)
+	     (mapconcat (lambda (x) (unless (listp x) (setq x (list x))) (mapconcat #'prin1-to-string x " ")) modlist ", ")
+	     (prin1-to-string for-ml)
+	     (pcase deprecation
+	       (`((since ,since) (note ,note)) (format "Since- %s; Note- %s" (prin1-to-string since) (prin1-to-string note)))
+	       (_ ""))))))
 
 
-(defun sercoq--ensure-sertop ()
-  "Start a sertop process if one isn't running already."
-  (unless (sercoq--get-state-variable 'process)
-    (message "Starting sertop")
-    (sercoq--start-sertop)))
+(defun sercoq--c-ast-to-string (c-ast)
+  "Return generic string representation of a coq CAst type value C-AST with its location appended to it after two newlines."
+
+  (pcase c-ast
+    (`((v ,value) (loc ,loc))
+
+     (format "%s\n\nLocation: %s\n"
+	     (prin1-to-string gentactic)
+	     (if loc (sercoq--coqloc-to-string loc) "")))))
 
 
-(defun sercoq--dequeue ()
-  "Dequeue sertop queue and return the dequeued element."
-  (let ((retval (sercoq-queue-dequeue (sercoq--get-state-variable 'sertop-queue))))
-    (setcdr (assq 'sertop-queue sercoq--state) (car retval))
-    (cdr retval)))
+(defun sercoq--globrefext-to-string (ref)
+  "Return string representation of extended global reference REF."
+  
+  (pcase ref
+    (`(TrueGlobal ,glob) (concat "TrueGlobal " (mapconcat #'prin1-to-string glob " ")))
+
+    (`(Abbrev ,abb) (format "Abbrev: %s" (prin1-to-string abb)))))
 
 
-(defun sercoq--enqueue (operation)
-  "Enqueue OPERATION to `sertop-queue'."
-  ;; ensure `operation' is a valid symbol
-  (if (find operation sercoq--queue-ops)
-      (setcdr (assq 'sertop-queue sercoq--state)
-	      (sercoq-queue-enqueue operation (sercoq--get-state-variable 'sertop-queue)))
-    (error "Attempt to queue invalid operation")))
+(defun sercoq--coqimplicit-to-string (implist)
+  "Return string representation of implicit status list IMPLIST."
+
+  ;; make sure implist is a doubly-nested list
+  (unless (listp implist) (setq implist (list implist)))
+  (unless (listp (car implist)) (setq implist (list implist)))
+  
+  (let (strlist
+	str)
+    (dolist (imp implist)
+      (setq str (format "Implicit side condition: %s; Implicit status: %s" (prin1-to-string (car imp)) (prin1-to-string (nth 1 imp))))
+      (push str strlist))
+
+    (setq strlist (nreverse strlist))
+
+    (mapconcat #'identity strlist "\n")))
 
 
-(defun sercoq--pp-to-string (val)
-  "Convert VAL to a printed sexp representation.
+(defun sercoq--coqprofdata-to-string (profdata)
+  "Return string representation of coq profiler data PROFDATA."
+
+  (pcase profdata
+    (`((name ,name) (total ,total) (local ,local) (ncalls ,ncalls) (max_total ,maxtot) (children ,chn))
+     (format "Name: %s; Total: %d; Local %d; NCalls: %d; Max total: %d; Children: %s\n"
+	     (prin1-to-string name)
+	     total local ncalls maxtot
+	     (prin1-to-string chn)))))
+
+
+(defun sercoq--coqnotation-to-string (notation)
+  "Return string representation of coq notation NOTATION."
+  
+  (format "Notation Entry: %s\nNotation Key: %s"
+	  (if (listp (car notation))
+	      (mapconcat #'prin1-to-string notation " ")
+	    (prin1-to-string (car notation)))
+
+	  (nth 1 notation)))
+
+
+(defun sercoq--coqgoal-to-string (goal)
+  "Return string representation of Coq goal GOAL."
+
+  (sercoq--ser-goals-to-string goal))
+
+
+(defun sercoq--ser-goals-to-string (sergoals)
+  "Return string representation of reified goal ser_goals type value SERGOALS."
+
+  (pcase sergoals
+    (`((goals ,goals) (stack ,stack) (bullet ,bullet) (shelf ,shelf) (given_up ,gup))
+     (format "Goals: %s\nStack: %s\nBullet: %s\nShelf: %s\nGiven Up: %s\n"
+	     (mapconcat #'sercoq--reified-goal-to-string goals "\n")
+	     (prin1-to-string stack)
+	     (prin1-to-string bullet)
+	     (mapconcat #'sercoq--reified-goal-to-string goals "\n")
+	     (mapconcat #'sercoq--reified-goal-to-string goals "\n")))))
+
+
+(defun sercoq--reified-goal-to-string (rgoal)
+  "Return string representation of reified goal RGOAL."
+
+  (pcase rgoal
+    (`((info ((evar ,evar) (name ,name))) (ty ,ty) (hyp ,hyps))
+     (format "-Reified goal-\nInfo: evar- %s; name- %s\nTy: %s\nHyp List: %s\n"
+	     (prin1-to-string evar) (prin1-to-string name)
+	     (prin1-to-string ty)
+	     (mapconcat #'sercoq--constrhyp-to-string hyps "\n")))))
+
+
+(defun sercoq--constrhyp-to-string (hyp)
+  "Return string representation of polymorphic hyp type value HYP."
+
+  (format "Hyp: %s; %s; %s"
+	  (mapconcat #'prin1-to-string (car hyp) ", ")
+	  (prin1-to-string (nth 1 hyp))
+	  (prin1-to-string (nth 2 hyp))))
+
+
+(defun sercoq--coqcomments-to-string (comments)
+  "Return string representation of CoqComments value COMMENTS."
+
+  (let (commlist
+	str)
+
+    (dolist (comment-group comments) ;; one comment group is mapped to each Add command executed in sertop
+      (dolist (comment comment-group)
+	(unless (string-blank-p (nth 1 comment))
+	  (setq str (format "%d-%d, Comment: %s"
+			    (car (car comment))
+			    (nth 1 (car comment))
+			    (nth 1 comment)))
+	  (push str commlist))))
+
+    (setq commlist (nreverse commlist))
+
+    (mapconcat 'identity commlist "\n")))
+
+
+ (defun sercoq--handle-answer (answer)
+   "Handle ANSWER received from sertop."
+   (pcase answer
+     ('Ack ())
+     ('Completed
+      ;; dequeue sertop queue and make other changes appropriate to the dequeued element
+      (pcase (sercoq--dequeue)
+	('parse (setcdr (assq 'inprocess-region sercoq--state) nil))
+	;; update checkpoint on successful execution
+	('exec (let* ((region (gethash (car (sercoq--get-state-variable 'sids))
+				       (sercoq--get-state-variable 'sentences)))
+		      (end (cdr region))
+		      (checkpoint (sercoq--get-state-variable 'checkpoint)))
+		 (unless (> checkpoint end)
+		   (sercoq--update-checkpoint end))))
+	('cancel ())
+	('query ())
+	(_ (error "Received completion message from sertop for unknown command"))))
+     
+     (`(Added ,sid ,loc ,_) (sercoq--handle-add sid loc))
+     (`(Canceled ,canceled-sids) (sercoq--handle-cancel canceled-sids))
+     (`(ObjList ,objlist) (sercoq--handle-objlist objlist))
+     (`(CoqExn ,exninfo)
+      (let ((queue (sercoq--get-state-variable 'sertop-queue))
+	    (errormsg (sercoq--exninfo-string exninfo)))
+	(pcase (sercoq-queue-front queue)
+	  ('parse (sercoq--handle-parse-error errormsg))
+	  ('exec (sercoq--handle-exec-error errormsg))
+	  (_ (sercoq--show-error errormsg)))))))
+
+
+ (defun sercoq--handle-parse-error (&optional errormsg)
+   "Display parsing error message ERRORMSG to user and update state accordingly."
+   ;; set inprocess region as nil
+   (let* ((region (sercoq--get-state-variable 'inprocess-region))
+	  (beg (number-to-string (car region)))
+	  (end (number-to-string (cdr region))))
+     (setcdr (assq 'inprocess-region sercoq--state) (list))
+     ;; display error message
+     (sercoq--show-error (concat "Parse error: " beg "-" end " :" errormsg))))
+
+
+ (defun sercoq--handle-exec-error (&optional errormsg)
+   "Display semantic error message ERRORMSG to user and update state accordingly."
+   (let* ((sids (sercoq--get-state-variable 'unexecd-sids))
+	  (errorsid (car sids)) ;; the topmost sid in sids caused the error
+	  (region (gethash errorsid (sercoq--get-state-variable 'sentences)))
+	  (beg (number-to-string (car region)))
+	  (end (number-to-string (cdr region))))
+     ;; cancel statements with unexecd sids
+     (sercoq--cancel-sids sids)
+     ;; remove the sids from state variable `sids' as well
+     (dolist (sid sids)
+       (setcdr (assq 'sids sercoq--state)
+	       (delete sid (sercoq--get-state-variable 'sids))))
+     ;; set unexecd sids as nil
+     (setcdr (assq 'unexecd-sids sercoq--state) (list))
+     ;; display error message
+     (sercoq--show-error (concat "Semantic error: " beg "-" end " :" errormsg))))
+
+
+ (defun sercoq--start-sertop ()
+   "Start a new sertop process asynchronously."
+   (let ((proc (make-process :name "sertop" :command '("sertop") :buffer (current-buffer) :sentinel #'ignore)))
+     (set-process-filter proc #'sercoq--sertop-filter)
+     (setq sercoq--state (sercoq--get-fresh-state proc))))
+
+
+ (defun sercoq-stop-sertop ()
+   "Kill the running sertop process, if any."
+   (interactive)
+   (let-alist sercoq--state
+     (if (and .process (process-live-p .process))
+	 (progn (set-process-filter .process #'ignore)
+		(delete-process .process)
+		(accept-process-output)
+		(message "Sercoq process stopped"))
+       (message "No running instance of sertop")))
+   (setq sercoq--state nil)
+   (dolist (buf (sercoq--buffers))
+     (kill-buffer (cdr buf)))
+   (delete-other-windows)
+   (sercoq--make-readonly-region-writable (point-min) (point-max))
+   (sercoq--reset-added-text-properties (point-min) (point-max))
+   ;; switch to fundamental mode
+   (fundamental-mode))
+
+
+ (defun sercoq--ensure-sertop ()
+   "Start a sertop process if one isn't running already."
+   (unless (sercoq--get-state-variable 'process)
+     (message "Starting sertop")
+     (sercoq--start-sertop)))
+
+
+ (defun sercoq--dequeue ()
+   "Dequeue sertop queue and return the dequeued element."
+   (let ((retval (sercoq-queue-dequeue (sercoq--get-state-variable 'sertop-queue))))
+     (setcdr (assq 'sertop-queue sercoq--state) (car retval))
+     (cdr retval)))
+
+
+ (defun sercoq--enqueue (operation)
+   "Enqueue OPERATION to `sertop-queue'."
+   ;; ensure `operation' is a valid symbol
+   (if (find operation sercoq--queue-ops)
+       (setcdr (assq 'sertop-queue sercoq--state)
+	       (sercoq-queue-enqueue operation (sercoq--get-state-variable 'sertop-queue)))
+     (error "Attempt to queue invalid operation")))
+
+
+ (defun sercoq--pp-to-string (val)
+   "Convert VAL to a printed sexp representation.
 Difference from `pp-to-string' is that it renders nil as (), not nil."
-  (if (listp val)
-      (concat "(" (mapconcat #'sercoq--pp-to-string val " ") ")")
-    (pp-to-string val)))
+   (if (listp val)
+       (concat "(" (mapconcat #'sercoq--pp-to-string val " ") ")")
+     (pp-to-string val)))
 
 
-(defun sercoq--construct-add-cmd (str)
-  "Construct an Add command with string STR to be sent to sertop."
-  (list 'Add nil str))
+ (defun sercoq--construct-add-cmd (str)
+   "Construct an Add command with string STR to be sent to sertop."
+   (list 'Add nil str))
 
 
-(defun sercoq--construct-exec-cmd (sid)
-  "Construct an Exec command with sid SID to be sent to sertop."
-  `(Exec ,sid))
+ (defun sercoq--construct-exec-cmd (sid)
+   "Construct an Exec command with sid SID to be sent to sertop."
+   `(Exec ,sid))
 
 
-(defun sercoq--construct-cancel-cmd (sids)
-  "Construct a Cancel command with list SIDS to be sent to sertop."
-  `(Cancel ,sids))
+ (defun sercoq--construct-cancel-cmd (sids)
+   "Construct a Cancel command with list SIDS to be sent to sertop."
+   `(Cancel ,sids))
 
 
-(defun sercoq--send-to-sertop (sexp &optional enqueue-sym)
-  "Send printed representation of SEXP to the running sertop process.
+ (defun sercoq--send-to-sertop (sexp &optional enqueue-sym)
+   "Send printed representation of SEXP to the running sertop process.
 If ENQUEUE-SYM is non-nil, enqueue it to sertop-queue."
-  (when enqueue-sym (sercoq--enqueue enqueue-sym))
-  ;; dont forget to send a newline at the end
-  (let ((proc (sercoq--get-state-variable 'process)))
-    (process-send-string proc (sercoq--pp-to-string sexp))
-    (process-send-string proc "\n")))
+   (when enqueue-sym (sercoq--enqueue enqueue-sym))
+   ;; dont forget to send a newline at the end
+   (let ((proc (sercoq--get-state-variable 'process)))
+     (process-send-string proc (sercoq--pp-to-string sexp))
+     (process-send-string proc "\n")))
 
 
-(defun sercoq--no-unclosed-comments-p (beg end &optional alternate)
-  "Predicate to check if the string between BEG and END has no unclosed coq comments.
+ (defun sercoq--no-unclosed-comments-p (beg end &optional alternate)
+   "Predicate to check if the string between BEG and END has no unclosed coq comments.
 If ALTERNATE is non-nil, check if the string between BEG and END has no unopened coq comments."
-  (let* ((str (buffer-substring-no-properties beg end))
-	 (unclosed 0) ;; number of unclosed comments
-	 (index 0)
-	 (len (length str)))
-    
-    (while (< index (1- len))
-      (let ((c1 (aref str index))
-	    (c2 (aref str (1+ index))))
-	(if (char-equal c1 ?\()
-	    (if (char-equal c2 ?*)
-		(setq unclosed (1+ unclosed)))
-	  
-	  (if (char-equal c1 ?*)
-	      (if (char-equal c2 ?\))
-		  (setq unclosed (1- unclosed))))))
-      (setq index (1+ index)))
+   (let* ((str (buffer-substring-no-properties beg end))
+	  (unclosed 0) ;; number of unclosed comments
+	  (index 0)
+	  (len (length str)))
+     
+     (while (< index (1- len))
+       (let ((c1 (aref str index))
+	     (c2 (aref str (1+ index))))
+	 (if (char-equal c1 ?\()
+	     (if (char-equal c2 ?*)
+		 (setq unclosed (1+ unclosed)))
+	   
+	   (if (char-equal c1 ?*)
+	       (if (char-equal c2 ?\))
+		   (setq unclosed (1- unclosed))))))
+       (setq index (1+ index)))
 
-    (if alternate
-	(>= unclosed 0)
-      (<= unclosed 0))))
-
-
-(defun sercoq--no-unopened-comments-p (beg end)
-  "Wrapper for sercoq--no-unopened-comments-p to check if the string between BEG and END has no unopened coq comments."
-  (sercoq--no-unclosed-comments-p beg end t))
+     (if alternate
+	 (>= unclosed 0)
+       (<= unclosed 0))))
 
 
-(defun sercoq--cancel-sids (sids)
-  "Cancels sentences with sids in the list SIDS."
-  ;; cancel the sid (and hence all depending on it will be cancelled automatically by sertop)
-  (sercoq--send-to-sertop (sercoq--construct-cancel-cmd sids) 'cancel))
+ (defun sercoq--no-unopened-comments-p (beg end)
+   "Wrapper for sercoq--no-unopened-comments-p to check if the string between BEG and END has no unopened coq comments."
+   (sercoq--no-unclosed-comments-p beg end t))
 
 
-(defun sercoq--add-string (str)
-  "Send an Add command to sertop with the given string STR."
-  (let ((cmd (sercoq--construct-add-cmd str)))
-    (sercoq--send-to-sertop cmd 'parse)))
+ (defun sercoq--cancel-sids (sids)
+   "Cancels sentences with sids in the list SIDS."
+   ;; cancel the sid (and hence all depending on it will be cancelled automatically by sertop)
+   (sercoq--send-to-sertop (sercoq--construct-cancel-cmd sids) 'cancel))
 
 
-(defun sercoq--wait-until-sertop-idle ()
-  "Keep accepting process output until `sertop-queue' is empty."
-  (while (not (sercoq-queue-emptyp (sercoq--get-state-variable 'sertop-queue)))
-    (accept-process-output (sercoq--get-state-variable 'process))))
+ (defun sercoq--add-string (str)
+   "Send an Add command to sertop with the given string STR."
+   (let ((cmd (sercoq--construct-add-cmd str)))
+     (sercoq--send-to-sertop cmd 'parse)))
 
 
-(defun sercoq--exec-unexecd-sids ()
-  "Send exec command to sertop for all newly added i.e. unexec'd sids."
-  ;; remember to reverse the unexec'd sids list
-  (setcdr (assq 'unexecd-sids sercoq--state) (nreverse (sercoq--get-state-variable 'unexecd-sids)))
-  ;; pop sids one by one and exec them
-  (let (sid)
-    (while (setq sid (car (sercoq--get-state-variable 'unexecd-sids)))
-      ;; clear the response buffer whenever a new sid is exec'd
-      (with-current-buffer (alist-get 'response (sercoq--buffers))
-	(erase-buffer))
-      ;; send exec command to sertop
-      (sercoq--send-to-sertop (sercoq--construct-exec-cmd sid) 'exec)
-      ;; wait until execution is completed
-      (sercoq--wait-until-sertop-idle)
-      ;; pop the top sid
-      (pop (sercoq--get-state-variable 'unexecd-sids)))))
+ (defun sercoq--wait-until-sertop-idle ()
+   "Keep accepting process output until `sertop-queue' is empty."
+   (while (not (sercoq-queue-emptyp (sercoq--get-state-variable 'sertop-queue)))
+     (accept-process-output (sercoq--get-state-variable 'process))))
 
 
-(defun sercoq--get-sid-at (arg)
-  "Get sid of sentence at position ARG."
-  (sercoq--get-sid-at-helper arg (sercoq--get-state-variable 'sids)))
+ (defun sercoq--exec-unexecd-sids ()
+   "Send exec command to sertop for all newly added i.e. unexec'd sids."
+   ;; remember to reverse the unexec'd sids list
+   (setcdr (assq 'unexecd-sids sercoq--state) (nreverse (sercoq--get-state-variable 'unexecd-sids)))
+   ;; pop sids one by one and exec them
+   (let (sid)
+     (while (setq sid (car (sercoq--get-state-variable 'unexecd-sids)))
+       ;; clear the response buffer whenever a new sid is exec'd
+       (with-current-buffer (alist-get 'response (sercoq--buffers))
+	 (erase-buffer))
+       ;; send exec command to sertop
+       (sercoq--send-to-sertop (sercoq--construct-exec-cmd sid) 'exec)
+       ;; wait until execution is completed
+       (sercoq--wait-until-sertop-idle)
+       ;; pop the top sid
+       (pop (sercoq--get-state-variable 'unexecd-sids)))))
 
 
-(defun sercoq--get-sid-at-helper (arg sids)
-  "Get sid of sentence at position ARG checking in the list SIDS."
-  (if (null sids)
-      nil ;; base case
-    
-    (let* ((sid (car sids))
-	   (region (gethash sid (sercoq--get-state-variable 'sentences)))
-	   (beg (car region))
-	   (end (cdr region)))
-      (if (and (>= arg beg) (<= arg end))
-	  sid
-	(sercoq--get-sid-at-helper arg (cdr sids))))))
-;; sadly elisp doesnt have tail-call recursion optimization or the above would have been faster
-;; the alternative is to use an ugly while loop, but the performance difference shouldn't matter all that much
+ (defun sercoq--get-sid-at (arg)
+   "Get sid of sentence at position ARG."
+   (sercoq--get-sid-at-helper arg (sercoq--get-state-variable 'sids)))
 
 
-(defun sercoq--read-query-preds ()
-  "Read query predicates from user."
-  (remove-if (lambda (x) (null (nth 1 x))) ;; remove options that are nil
-	     `((Prefix ,(read-string "Query predicate - Prefix (leave default for sertop default): " nil nil '(nil))))))
+ (defun sercoq--get-sid-at-helper (arg sids)
+   "Get sid of sentence at position ARG checking in the list SIDS."
+   (if (null sids)
+       nil ;; base case
+     
+     (let* ((sid (car sids))
+	    (region (gethash sid (sercoq--get-state-variable 'sentences)))
+	    (beg (car region))
+	    (end (cdr region)))
+       (if (and (>= arg beg) (<= arg end))
+	   sid
+	 (sercoq--get-sid-at-helper arg (cdr sids))))))
+ ;; sadly elisp doesnt have tail-call recursion optimization or the above would have been faster
+ ;; the alternative is to use an ugly while loop, but the performance difference shouldn't matter all that much
 
 
-(defun sercoq--read-non-neg-number (prompt)
-  "Read number from user, displaying PROMPT.
+ (defun sercoq--read-query-preds ()
+   "Read query predicates from user."
+   (remove-if (lambda (x) (null (nth 1 x))) ;; remove options that are nil
+	      `((Prefix ,(read-string "Query predicate - Prefix (leave default for sertop default): " nil nil '(nil))))))
+
+
+ (defun sercoq--read-non-neg-number (prompt)
+   "Read number from user, displaying PROMPT.
 In case of negative number or no number, return nil."
-  (let ((num (read-number prompt -1)))
-    (if (>= num 0)
-	num
-      nil)))
+   (let ((num (read-number prompt -1)))
+     (if (>= num 0)
+	 num
+       nil)))
 
 
-(defun sercoq--read-sid (prompt)
-  "Read number from user displaying PROMPT.
+ (defun sercoq--read-sid (prompt)
+   "Read number from user displaying PROMPT.
 Return the number if it is a valid sid."
-  (let ((num (read-number prompt -1)))
-    (if (and (>= num 0)
-	     (gethash num (sercoq--get-state-variable 'sentences)))
-	num
-      nil)))
+   (let ((num (read-number prompt -1)))
+     (if (and (>= num 0)
+	      (gethash num (sercoq--get-state-variable 'sentences)))
+	 num
+       nil)))
 
 
-(defun sercoq--read-format-opts ()
-  "Read format options from user."
-  (remove-if (lambda (x) (null (nth 1 x))) ;; remove options that are nil
-	     `((pp_format ,(completing-read "Pp format (default: PpStr): " '(PpSer PpStr PpTex PpCoq) nil t nil nil '(PpStr)))
-	       (pp_depth ,(sercoq--read-non-neg-number "Pp depth (leave default for sertop default): "))
-	       (pp_elide ,(read-string "Pp Elipsis (leave default for sertop default): " nil nil '(nil)))
-	       (pp_margin ,(sercoq--read-non-neg-number "Pp Margin (leave default for sertop default): ")))))
+ (defun sercoq--read-format-opts ()
+   "Read format options from user."
+   (remove-if (lambda (x) (null (nth 1 x))) ;; remove options that are nil
+	      `((pp_format ,(completing-read "Pp format (default: PpStr): " '(PpSer PpStr PpTex PpCoq) nil t nil nil '(PpStr)))
+		(pp_depth ,(sercoq--read-non-neg-number "Pp depth (leave default for sertop default): "))
+		(pp_elide ,(read-string "Pp Elipsis (leave default for sertop default): " nil nil '(nil)))
+		(pp_margin ,(sercoq--read-non-neg-number "Pp Margin (leave default for sertop default): ")))))
 
 
-(defun sercoq--read-query-opts ()
-  "Read query options from user."
-  (remove-if (lambda (x) (null (nth 1 x))) ;; remove options that are nil
-	     `((preds ,(sercoq--read-query-preds)) ;; predicates
-	       (limit ,(sercoq--read-non-neg-number "Limit on number of results (leave default for no limit): "))
-	       (sid ,(sercoq--read-sid "Sentence id (leave default for no specific sid): "))
-	       (pp ,(sercoq--read-format-opts)))))
+ (defun sercoq--read-query-opts ()
+   "Read query options from user."
+   (remove-if (lambda (x) (null (nth 1 x))) ;; remove options that are nil
+	      `((preds ,(sercoq--read-query-preds)) ;; predicates
+		(limit ,(sercoq--read-non-neg-number "Limit on number of results (leave default for no limit): "))
+		(sid ,(sercoq--read-sid "Sentence id (leave default for no specific sid): "))
+		(pp ,(sercoq--read-format-opts)))))
 
 
-(defun sercoq--default-query-opts ()
-  "Default query opts for sercoq-mode."
-  `((pp ((pp_format PpStr)))))
+ (defun sercoq--default-query-opts ()
+   "Default query opts for sercoq-mode."
+   `((pp ((pp_format PpStr)))))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -645,202 +938,205 @@ Return the number if it is a valid sid."
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
-(defun sercoq-update-goals ()
-  "Send a goals query to sertop and update goals buffer."
-  (interactive)
-  ;; indicate in state that current query type is goals and is an 'auto' query, i.e, not sent by the user explicitly
-  (setcdr (assq 'last-query-type sercoq--state) '(goals . auto))
-  ;; clear the goals buffer
-  (with-current-buffer (alist-get 'goals (sercoq--buffers))
-    (erase-buffer))
-  ;; send a goals query
-  (sercoq--send-to-sertop `(Query ,(sercoq--default-query-opts) Goals) 'query))
+ (defun sercoq-update-goals ()
+   "Send a goals query to sertop and update goals buffer."
+   (interactive)
+   ;; indicate in state that current query type is goals and is an 'auto' query, i.e, not sent by the user explicitly
+   (setcdr (assq 'last-query-type sercoq--state) '(goals . auto))
+   ;; clear the goals buffer
+   (with-current-buffer (alist-get 'goals (sercoq--buffers))
+     (erase-buffer))
+   ;; send a goals query
+   (sercoq--send-to-sertop `(Query ,(sercoq--default-query-opts) Goals) 'query))
 
 
-(defun sercoq-sentence-id-at-point ()
-  "Get sentence id of the sentence at point."
-  (interactive)
-  (let ((sid (sercoq--get-sid-at (point))))
-    (message (if sid
-		 (number-to-string sid)
-	       "no sentence exists at current point"))))
+ (defun sercoq-sentence-id-at-point ()
+   "Get sentence id of the sentence at point."
+   (interactive)
+   (let ((sid (sercoq--get-sid-at (point))))
+     (message (if sid
+		  (number-to-string sid)
+		"no sentence exists at current point"))))
 
 
-(defun sercoq-forward-sentence (&optional arg)
-  "Move point to the end of the next coq sentence, skipping comments.
+ (defun sercoq-forward-sentence (&optional arg)
+   "Move point to the end of the next coq sentence, skipping comments.
 The action is performed ARG times (defaults to 1).
 If ARG is negative, perform ARG times the operation of moving point to the end of the previous sentence."
-  (interactive "p")
-  (or arg (setq arg 1))
-  
-  (while (> arg 0)
-    (let ((beg (point))
-	  (loop-condition t))
-      ;; a make-shift exit control loop
-      (while loop-condition
-	(re-search-forward sercoq--sentence-end nil t) ;; the additional two arguments are to tell elisp to not raise error if no match is found
-	(skip-chars-backward " \t\n")
-	
-	(when (sercoq--no-unclosed-comments-p beg (point)) ;; when no unclosed comments remain, set loop-condition to exit loop
-	  (setq loop-condition nil))))
-    (setq arg (1- arg)))
+   (interactive "p")
+   (or arg (setq arg 1))
+   
+   (while (> arg 0)
+     (let ((beg (point))
+	   (loop-condition t))
+       ;; a make-shift exit control loop
+       (while loop-condition
+	 (re-search-forward sercoq--sentence-end nil t) ;; the additional two arguments are to tell elisp to not raise error if no match is found
+	 (skip-chars-backward " \t\n")
+	 
+	 (when (sercoq--no-unclosed-comments-p beg (point)) ;; when no unclosed comments remain, set loop-condition to exit loop
+	   (setq loop-condition nil))))
+     (setq arg (1- arg)))
 
-  ;; for negative, the idea is to search backward for the regex
-  ;; the search needs to be done once or twice depending on whether point
-  ;; is in the middle of a sentence or at the end, which is found using
-  ;; `looking-back'
-  (while (< arg 0)
-    (let ((beg (point))
-	  (loop-condition t))
-      (while loop-condition
-	(when (looking-back sercoq--sentence-end nil)
-	  ;; when already at the end of a sentence,
-	  ;; move the point to before the end so we can search backward for the regex to go to the end of previous sentence
-	  (re-search-backward sercoq--sentence-end nil t))
-	(re-search-backward sercoq--sentence-end nil t)
-	(re-search-forward "\\." nil t) ;; move point to end of previous sentence
-	(when (sercoq--no-unopened-comments-p beg (point)) ;; when no unopened comments remain, set loop-condition to exit loop
-	  (setq loop-condition nil))))
-    (setq arg (1+ arg))))
-
-
-(defun sercoq-backward-sentence ()
-  "Move point to the end of the previous sentence."
-  (interactive)
-  (sercoq-forward-sentence -1))
+   ;; for negative, the idea is to search backward for the regex
+   ;; the search needs to be done once or twice depending on whether point
+   ;; is in the middle of a sentence or at the end, which is found using
+   ;; `looking-back'
+   (while (< arg 0)
+     (let ((beg (point))
+	   (loop-condition t))
+       (while loop-condition
+	 (when (looking-back sercoq--sentence-end nil)
+	   ;; when already at the end of a sentence,
+	   ;; move the point to before the end so we can search backward for the regex to go to the end of previous sentence
+	   (re-search-backward sercoq--sentence-end nil t))
+	 (re-search-backward sercoq--sentence-end nil t)
+	 (re-search-forward "\\." nil t) ;; move point to end of previous sentence
+	 (when (sercoq--no-unopened-comments-p beg (point)) ;; when no unopened comments remain, set loop-condition to exit loop
+	   (setq loop-condition nil))))
+     (setq arg (1+ arg))))
 
 
-(defun sercoq-exec-region (beg end)
-  "Parse and execute the text in the region marked by BEG and END."
-  (interactive "r")
-  ;; update region boundaries to exclude text that overlaps with already executed text
-  (unless (> beg (sercoq--get-state-variable 'checkpoint))
-    (setq beg (sercoq--get-state-variable 'checkpoint)))
-
-  (unless (> beg end)
-    ;; clear error buffer
-    (sercoq--clear-error-buffer)
-    ;; set inprocess-region in state
-    (setcdr (assq 'inprocess-region sercoq--state) `(,beg . ,end))
-    (sercoq--add-string (buffer-substring-no-properties beg end))
-    (sercoq--wait-until-sertop-idle)
-    ;; now exec the newly added sids
-    (sercoq--exec-unexecd-sids)
-    ;; update goals
-    (sercoq-update-goals)
-    (sercoq-show-buffers)))
+ (defun sercoq-backward-sentence ()
+   "Move point to the end of the previous sentence."
+   (interactive)
+   (sercoq-forward-sentence -1))
 
 
-(defun sercoq-cancel-statements-upto-point (pt)
-  "Revert execution of all sentences whose end lies after point PT."
-  (interactive "d")
-  (let ((sentences (sercoq--get-state-variable 'sentences))
-	(sids (sercoq--get-state-variable 'sids))
-	(sids-to-cancel (list)))
+ (defun sercoq-exec-region (beg end)
+   "Parse and execute the text in the region marked by BEG and END."
+   (interactive "r")
+   ;; update region boundaries to exclude text that overlaps with already executed text
+   (unless (> beg (sercoq--get-state-variable 'checkpoint))
+     (setq beg (sercoq--get-state-variable 'checkpoint)))
 
-    ;; find which sids-to-cancel
-    (while (and sids (< pt (cdr (gethash (car sids) sentences))))
-      (push (car sids) sids-to-cancel)
-      (setq sids (cdr sids)))
-
-    ;; cancel the sid (and hence all depending on it will be cancelled automatically by sertop)
-    (sercoq--cancel-sids sids-to-cancel)
-    ;; update goals
-    (sercoq-update-goals)))
-
-
-(defun sercoq-exec-next-sentence ()
-  "Find next full sentence after checkpoint and execute it."
-  (interactive)
-  (let ((beg (sercoq--get-state-variable 'checkpoint)))
-    (goto-char beg)
-    (sercoq-forward-sentence)
-    (sercoq-exec-region beg (point))
-    (forward-char)))
+   (unless (> beg end)
+     ;; clear error buffer
+     (sercoq--clear-error-buffer)
+     ;; set inprocess-region in state
+     (setcdr (assq 'inprocess-region sercoq--state) `(,beg . ,end))
+     (sercoq--add-string (buffer-substring-no-properties beg end))
+     (sercoq--wait-until-sertop-idle)
+     ;; now exec the newly added sids
+     (sercoq--exec-unexecd-sids)
+     ;; update goals
+     (sercoq-update-goals)
+     (sercoq-show-buffers)))
 
 
-(defun sercoq-undo-previous-sentence ()
-  "Undo the last executed sentence."
-  (interactive)
-  ;; move point to beginning of the last executed sentence and execute 'sercoq-cancel-statements-upto-point
-  (let* ((sid (car (sercoq--get-state-variable 'sids)))
-	 (pos (gethash sid (sercoq--get-state-variable 'sentences))))
-    (goto-char (car pos))
-    (sercoq-cancel-statements-upto-point (point))))
+ (defun sercoq-cancel-statements-upto-point (pt)
+   "Revert execution of all sentences whose end lies after point PT."
+   (interactive "d")
+   (let ((sentences (sercoq--get-state-variable 'sentences))
+	 (sids (sercoq--get-state-variable 'sids))
+	 (sids-to-cancel (list)))
+
+     ;; find which sids-to-cancel
+     (while (and sids (< pt (cdr (gethash (car sids) sentences))))
+       (push (car sids) sids-to-cancel)
+       (setq sids (cdr sids)))
+
+     ;; cancel the sid (and hence all depending on it will be cancelled automatically by sertop)
+     (sercoq--cancel-sids sids-to-cancel)
+     ;; update goals
+     (sercoq-update-goals)))
 
 
-(defun sercoq-exec-buffer ()
-  "Execute the entire buffer."
-  (interactive)
-  (sercoq-exec-region (point-min) (point-max)))
+ (defun sercoq-exec-next-sentence ()
+   "Find next full sentence after checkpoint and execute it."
+   (interactive)
+   (let ((beg (sercoq--get-state-variable 'checkpoint)))
+     (goto-char beg)
+     (sercoq-forward-sentence)
+     (sercoq-exec-region beg (point))
+     (forward-char)))
 
 
-(defun sercoq-retract-buffer ()
-  "Undo all executed parts of the buffer."
-  (interactive)
-  (sercoq-cancel-statements-upto-point (point-min)))
+ (defun sercoq-undo-previous-sentence ()
+   "Undo the last executed sentence."
+   (interactive)
+   ;; move point to beginning of the last executed sentence and execute 'sercoq-cancel-statements-upto-point
+   (let* ((sid (car (sercoq--get-state-variable 'sids)))
+	  (pos (gethash sid (sercoq--get-state-variable 'sentences))))
+     (goto-char (car pos))
+     (sercoq-cancel-statements-upto-point (point))))
 
 
-(defun sercoq-goto-end-of-locked ()
-  "Go to the end of executed region."
-  (interactive)
-  (goto-char (sercoq--get-state-variable 'checkpoint)))
+ (defun sercoq-exec-buffer ()
+   "Execute the entire buffer."
+   (interactive)
+   (sercoq-exec-region (point-min) (point-max)))
 
 
-(defun sercoq-autocomplete-current-word ()
-  "Provides autocompletion for current word using the package `dropdown-list'."
-  (interactive)
-  (require 'dropdown-list)
-  (let ((str (thing-at-point 'word t))) ;; get word at point
-    ;; indicate in state that current query type is completion and auto (not sent by user explicitly)
-    (setcdr (assq 'last-query-type sercoq--state) '(completion . auto))
-    ;; send an autocomplete query
-    (sercoq--send-to-sertop `(Query ,(sercoq--default-query-opts) (Complete ,str)) 'query)))
+ (defun sercoq-retract-buffer ()
+   "Undo all executed parts of the buffer."
+   (interactive)
+   (sercoq-cancel-statements-upto-point (point-min)))
 
 
-(defun sercoq-make-query ()
-  "Make a query of ARG type to sertop."
-  (interactive)
-  ;; clear the query results buffer
-  (sercoq--clear-query-results-buffer)
-  (let* ((argstr (completing-read "Query type: " (mapcar #'car sercoq--query-cmds) nil t))
-	 (arg (read argstr))
-	 (query-cmd (eval (alist-get arg sercoq--query-cmds)))
-	 (query (when query-cmd `(Query
-				  ,(if (y-or-n-p "Do you want to specify query options? ")
-				       (sercoq--read-query-opts)
-				     (sercoq--default-query-opts))
-				  ,query-cmd))))
-    ;; indicate in state the current query type and that it's a user sent query
-    (setcdr (assq 'last-query-type sercoq--state) `(,arg . user))
-    (sercoq--send-to-sertop query 'query))
-  (sercoq--show-query-results-buffer))
+ (defun sercoq-goto-end-of-locked ()
+   "Go to the end of executed region."
+   (interactive)
+   (goto-char (sercoq--get-state-variable 'checkpoint)))
 
 
-;; define the major mode function deriving from the basic mode `prog-mode'
-(define-derived-mode sercoq-mode
-  prog-mode "Sercoq"
-  "Major mode for interacting with Coq."
-
-  ;; set comment-start and comment-end for prog mode
-  (set (make-local-variable 'comment-start) "(*")
-  (set (make-local-variable 'comment-end) "*)")
-  
-  ;; add some keyboard shortcuts to the keymap
-  (define-key sercoq-mode-map (kbd "M-e") #'sercoq-forward-sentence)
-  (define-key sercoq-mode-map (kbd "M-a") #'sercoq-backward-sentence)
-  (define-key sercoq-mode-map (kbd "<C-tab>") #'sercoq-autocomplete-current-word)
-  (define-key sercoq-mode-map (kbd "C-c C-n") #'sercoq-exec-next-sentence)
-  (define-key sercoq-mode-map (kbd "C-c C-u") #'sercoq-undo-previous-sentence)
-  (define-key sercoq-mode-map (kbd "C-c C-b") #'sercoq-exec-buffer)
-  (define-key sercoq-mode-map (kbd "C-c C-r") #'sercoq-retract-buffer)
-  (define-key sercoq-mode-map (kbd "C-c C-.") #'sercoq-goto-end-of-locked)
-  (define-key sercoq-mode-map (kbd "C-c C-c") #'sercoq-stop-sertop)
-  
-  ;; start sertop if not already started
-  (sercoq--ensure-sertop))
+ (defun sercoq-autocomplete-current-word ()
+   "Provides autocompletion for current word using the package `dropdown-list'."
+   (interactive)
+   (require 'dropdown-list)
+   (let ((str (thing-at-point 'word t))) ;; get word at point
+     ;; indicate in state that current query type is completion and auto (not sent by user explicitly)
+     (setcdr (assq 'last-query-type sercoq--state) '(completion . auto))
+     ;; send an autocomplete query
+     (sercoq--send-to-sertop `(Query ,(sercoq--default-query-opts) (Complete ,str)) 'query)))
 
 
-(provide 'sercoq)
+ (defun sercoq-make-query ()
+   "Make a query of ARG type to sertop."
+   (interactive)
+   ;; clear error buffer
+   (sercoq--clear-error-buffer)
+   ;; clear the query results buffer
+   (sercoq--clear-query-results-buffer)
+   (let* ((argstr (completing-read "Query type: " (mapcar #'car sercoq--query-cmds) nil t))
+	  (arg (read argstr))
+	  (query-cmd (eval (alist-get arg sercoq--query-cmds)))
+	  (query (when query-cmd `(Query
+				   ,(if (y-or-n-p "Do you want to specify query options? ")
+					(sercoq--read-query-opts)
+				      (sercoq--default-query-opts))
+				   ,query-cmd))))
+     ;; indicate in state the current query type and that it's a user sent query
+     (setcdr (assq 'last-query-type sercoq--state) `(,arg . user))
+     (sercoq--send-to-sertop query 'query))
+   (sercoq--show-query-results-buffer))
+
+
+ ;; define the major mode function deriving from the basic mode `prog-mode'
+ (define-derived-mode sercoq-mode
+   prog-mode "Sercoq"
+   "Major mode for interacting with Coq."
+
+   ;; set comment-start and comment-end for prog mode
+   (set (make-local-variable 'comment-start) "(*")
+   (set (make-local-variable 'comment-end) "*)")
+   
+   ;; add some keyboard shortcuts to the keymap
+   (define-key sercoq-mode-map (kbd "M-e") #'sercoq-forward-sentence)
+   (define-key sercoq-mode-map (kbd "M-a") #'sercoq-backward-sentence)
+   (define-key sercoq-mode-map (kbd "<C-tab>") #'sercoq-autocomplete-current-word)
+   (define-key sercoq-mode-map (kbd "C-c C-n") #'sercoq-exec-next-sentence)
+   (define-key sercoq-mode-map (kbd "C-c C-u") #'sercoq-undo-previous-sentence)
+   (define-key sercoq-mode-map (kbd "C-c C-b") #'sercoq-exec-buffer)
+   (define-key sercoq-mode-map (kbd "C-c C-r") #'sercoq-retract-buffer)
+   (define-key sercoq-mode-map (kbd "C-c C-.") #'sercoq-goto-end-of-locked)
+   (define-key sercoq-mode-map (kbd "C-c C-q") #'sercoq-make-query)
+   (define-key sercoq-mode-map (kbd "C-c C-c") #'sercoq-stop-sertop)
+   
+   ;; start sertop if not already started
+   (sercoq--ensure-sertop))
+
+
+ (provide 'sercoq)
 
 ;;; sercoq.el ends here
