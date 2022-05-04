@@ -110,7 +110,7 @@ If ALTERNATE is non-nil, all windows are split horizontally"
     (pnotations . (quote PNotations))
     (profile-data . (quote ProfileData))
     (proof . (quote Proof))
-    (vernac . (list 'Vernac (read-string "Vernac of : ")))
+    (vernac . (list 'Vernac (progn (setcdr (assq 'vernac-flag sercoq--state) t) (read-string "Vernac of : "))))
     (env . (quote Env))
     (assumptions .(list 'Assumptions (read-string "Assumptions of : ")))
     (completion . (list 'Complete (read-string "Completions of : ")))
@@ -136,6 +136,7 @@ beginning and end positions of the corresponding coq sentence in the document
 - `accumulator': list of strings output by the process that have not been interpreted as sexps yet.
 - `inprocess-region': a cons cell (beginning . end) denoting position of the string in the buffer that has been sent for parsing but hasn't been fully parsed yet
 - `last-query-type': a cons cell (a . b) where a is a symbol representing the last sent query and b is a symbol representing whether it was sent by the user or automatically.
+- `vernac-flag' : a value which if non-nil, indicates that the current feedback received from sertop is the result of a vernac query
 - `checkpoint': the position upto which the buffer has been executed and is therefore locked"
   `((process . ,process)
     (sertop-queue . ,(sercoq-queue-create))
@@ -145,6 +146,7 @@ beginning and end positions of the corresponding coq sentence in the document
     (sentences . ,(make-hash-table :test 'eq))
     (accumulator . ,(list))
     (last-query-type . ,(list))
+    (vernac-flag . ,(list))
     (inprocess-region . ,(list))
     (checkpoint . ,1)))
 
@@ -210,22 +212,32 @@ beginning and end positions of the corresponding coq sentence in the document
 
      (let-alist sercoq--state
        (let ((sen (gethash sid .sentences))
-	     (oldmessage ""))
+	     (oldmessage (make-string 0 ?x))) ;; empty string
 	 (and sen
 	      (pcase contents
 		( `(Message (level Notice) ,_ ,_ (str ,newmessage))
+
 		  ;; get any previous uncleared message that may be present
 		  (setq oldmessage (get-text-property (car sen) 'help-echo))
-		  ;; if there is existing message, concatenate newmessage to it
-		  (when oldmessage
+
+		  ;; if there is existing message and is not a vernac query result, concatenate newmessage to it to form the final message
+		  (when (and (null (sercoq--get-state-variable 'vernac-flag)) oldmessage)
 		    (setq newmessage (concat oldmessage "\n" newmessage)))
-		  (let ((inhibit-read-only t))
-		    (with-silent-modifications
-		      (put-text-property (car sen) (cdr sen) 'help-echo newmessage)))
-		  ;; put the received coq output in response buffer
-		  (with-current-buffer (alist-get 'response (sercoq--buffers))
-		    (erase-buffer)
-		    (insert newmessage))))))))))
+
+		  ;; set text echo message as the final message if it is not a vernac query result
+		  (unless (sercoq--get-state-variable 'vernac-flag)
+		    (let ((inhibit-read-only t))
+		      (with-silent-modifications
+			(put-text-property (car sen) (cdr sen) 'help-echo newmessage))))
+		  
+		  ;; put the received coq output in the appropriate buffer
+		  (let ((buf (if (sercoq--get-state-variable 'vernac-flag)
+				 (progn	(setcdr (assq 'vernac-flag sercoq--state) nil) ;; reset the flag
+					'query-results)
+			       'response)))
+		    (with-current-buffer (alist-get buf (sercoq--buffers))
+		      (erase-buffer)
+		      (insert newmessage)))))))))))
 
 
 (defun sercoq--get-loc-bounds (loc)
